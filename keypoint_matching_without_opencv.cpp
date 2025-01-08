@@ -557,8 +557,8 @@ std::vector<unsigned char> drawMatches(
 int main()
 {
     // Paths to your images
-    std::string leftImagePath  = "../Datasets/courtyard_dslr_undistorted/courtyard/images/left.jpg";
-    std::string rightImagePath = "../Datasets/courtyard_dslr_undistorted/courtyard/images/right.jpg";
+    std::string leftImagePath = "../Datasets/artroom1/im0.png";
+    std::string rightImagePath = "../Datasets/artroom1/im1.png";
 
     GrayImage leftImg  = loadGrayImage(leftImagePath);
     GrayImage rightImg = loadGrayImage(rightImagePath);

@@ -5,8 +5,8 @@
 
 int main() {
     // Paths to stereo image pair
-    std::string leftImagePath = "../Datasets/courtyard_dslr_undistorted/courtyard/images/left.jpg";
-    std::string rightImagePath = "../Datasets/courtyard_dslr_undistorted/courtyard/images/right.jpg";
+    std::string leftImagePath = "../Datasets/artroom1/im0.png";
+    std::string rightImagePath = "../Datasets/artroom1/im1.png";
 
     // Load stereo images
     cv::Mat leftImage = cv::imread(leftImagePath, cv::IMREAD_GRAYSCALE);
@@ -35,8 +35,8 @@ int main() {
         return a.distance < b.distance;
     });
 
-    // Draw the top 3 matches
-    const int numMatchesToDraw = 3;
+    // Draw the top 10 matches
+    const int numMatchesToDraw = 10;
     std::vector<cv::DMatch> topMatches(matches.begin(), matches.begin() + std::min((int)matches.size(), numMatchesToDraw));
 
     // Create a canvas for matches

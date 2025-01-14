@@ -9,6 +9,8 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(FLANN REQUIRED)
 
+include_directories(${OpenCV_INCLUDE_DIRS} ${FLANN_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIR})
+
 # Common headers
 set(HEADERS
     Eigen.h
@@ -40,6 +42,23 @@ target_link_libraries(keypoint_matching_no_opencv
     flann
     lz4
 )
+
+
+# 3) Executable: stereo_reconstruction
+set(SRC_STEREO
+    stereo_reconstruction.cpp
+    ${HEADERS}
+)
+add_executable(stereo_reconstruction ${SRC_STEREO})
+target_link_libraries(stereo_reconstruction
+    Eigen3::Eigen
+    ${OpenCV_LIBS}
+    flann
+    lz4
+)
+
+
+
 
 # To build the 'main.cpp' for stereo_reconstruction:
 # set(SOURCES main.cpp ${HEADERS})

@@ -20,30 +20,6 @@
 #include <opencv2/imgproc.hpp>
 #include <fstream>
 
-
-/*
-* @brief Holds data of a COLMAP camera.
-* @note Taken from ETH3D privded format loader https://github.com/ETH3D/format-loader/tree/master
-*/
-struct ColmapCamera {
-  // Unique camera id.
-  int camera_id;
-  
-  // Name of the distortion model. Determines the number of parameters.
-  std::string model_name;
-  
-  // Image width in pixels.
-  int width;
-  
-  // Image height in pixels.
-  int height;
-  
-  // Distortion parameters. Their number and interpretation depends on the
-  // distortion model.
-  double parameters[4];
-};
-
-
 void normalizePoints(const std::vector<cv::Point2f>& points, 
                     std::vector<cv::Point2f>& normalizedPoints,
                     cv::Mat& T) {
@@ -78,7 +54,6 @@ void normalizePoints(const std::vector<cv::Point2f>& points,
         normalizedPoints[i].y = p_norm.at<double>(1)/p_norm.at<double>(2);
     }
 }
-
 
 
 /**
@@ -284,72 +259,6 @@ cv::Mat ransacFundamentalMatrix(
               << pointsLeft.size() << std::endl;
     return bestF;
 }
-
-
-/*
-* @brief Parse the camera intrinsics from the cameras.txt file
-* @param cameraIndex   The index of the camera to parse (0-3)
-* @param cameraTxtPath The path to the cameras.txt file
-* @return              The parsed camera intrinsics
-* @note                The camera idex for current images left.jpg and right.jpg is 1
-*/
-
-ColmapCamera parseCameraIntrinsicsLeftRight(const int cameraIndex, const std::string& cameraTxtPath)
-{
-    printf("Test\n");
-    if (cameraIndex < 0 || cameraIndex > 3) {
-        std::cerr << "Error: Invalid camera index." << std::endl;
-        exit(-1);
-    }
-
-    // Load cameras.txt file
-    std::ifstream txtFile(cameraTxtPath);
-    if (!txtFile.is_open()) {
-        std::cerr << "Error: Could not open camera intrinsics file." << std::endl;
-        exit(-1);
-    }
-
-    std::string line;
-    while (std::getline(txtFile, line)) {
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '#') {
-            std::cerr << "Debug: Skipping comment or empty line." << std::endl;
-            continue;
-        }
-
-        std::istringstream lineStream(line);
-        int currentCameraId;
-        if (!(lineStream >> currentCameraId)) {
-            std::cerr << "Debug: Failed to parse camera ID in line: " << line << std::endl;
-            continue;
-        }
-
-        std::cerr << "Debug: Line " << line << std::endl;
-
-        if (currentCameraId == cameraIndex) {
-            ColmapCamera camera;
-            camera.camera_id = currentCameraId;
-            
-            // Read all values explicitly
-            if (!(lineStream >> camera.model_name 
-                          >> camera.width 
-                          >> camera.height 
-                          >> camera.parameters[0]  // fx
-                          >> camera.parameters[1]  // fy
-                          >> camera.parameters[2]  // cx
-                          >> camera.parameters[3])) {  // cy
-                std::cerr << "Error: Failed to parse camera parameters." << std::endl;
-                exit(-1);
-            }
-            std::cerr << "Debug: Camera parameters parsed successfully." << std::endl;
-            return camera;
-        }
-    }
-
-    std::cerr << "Error: Camera index " << cameraIndex << " not found." << std::endl;
-    exit(-1);
-}
-
 
 
 /**
@@ -656,9 +565,9 @@ void stereoRectifyAndComputeDisparity(const cv::Mat& F, const cv::Mat& K1, const
 
 int main()
 {
-   // 1. Load images
-    std::string leftImagePath  = "/workspace/Datasets/courtyard_dslr_undistorted/courtyard/images/left.jpg";
-    std::string rightImagePath = "/workspace/Datasets/courtyard_dslr_undistorted/courtyard/images/right.jpg";
+   // 1. load the images
+    std::string leftImagePath  = "/workspace/Datasets/im0.png";
+    std::string rightImagePath = "/workspace/Datasets/im1.png";
 
     cv::Mat leftImage  = cv::imread(leftImagePath, cv::IMREAD_GRAYSCALE);
     cv::Mat rightImage = cv::imread(rightImagePath, cv::IMREAD_GRAYSCALE);
@@ -752,28 +661,27 @@ int main()
     std::cout << "Match image saved to " << outputPath << std::endl;
   
 
-    // 10. Load camera intrinsics from cameras.txt
-    std::string cameraTxtPath = "/workspace/Datasets/courtyard_dslr_undistorted/courtyard/dslr_calibration_undistorted/cameras.txt";
-    // std::cerr << "Debug: File path is " << cameraTxtPath << std::endl;获取得到的路径
-    ColmapCamera camera = parseCameraIntrinsicsLeftRight(1, cameraTxtPath);
-    std::cout << "Camera intrinsics for camera index 1:\n"
-              << "Model: " << camera.model_name << "\n"
-              << "Width: " << camera.width << "\n"
-              << "Height: " << camera.height << "\n"
-              << "Parameters: fx=" << camera.parameters[0] << ", fy=" << camera.parameters[1]
-              << ", cx=" << camera.parameters[2] << ", cy=" << camera.parameters[3] << std::endl;
-    
-    // Convert camera intrinsics to intrinsics matrix K
-    cv::Mat K = (cv::Mat_<double>(3, 3) << 
-        camera.parameters[0], 0, camera.parameters[2],
-        0, camera.parameters[1], camera.parameters[3],
-        0, 0, 1);
+    // 10. Load camera intrinsics directly
+cv::Mat cam0 = (cv::Mat_<double>(3, 3) << 
+    1758.23, 0, 953.34,  
+    0, 1758.23, 552.29, 
+    0, 0, 1);             
+
+cv::Mat cam1 = (cv::Mat_<double>(3, 3) << 
+    1758.23, 0, 953.34,  
+    0, 1758.23, 552.29,  
+    0, 0, 1);             
+
+// Camera parameters are now directly stored in cam0 and cam1
+std::cout << "Camera intrinsics for cam0:\n" 
+          << "fx=" << cam0.at<double>(0, 0) << ", fy=" << cam0.at<double>(1, 1) 
+          << ", cx=" << cam0.at<double>(0, 2) << ", cy=" << cam0.at<double>(1, 2) << std::endl;
+
 
 
     // 11. Perform stereo rectification and compute disparity 
-    stereoRectifyAndComputeDisparity(F_all, K, K, leftImage, rightImage, ptsLeft, ptsRight); 
+    stereoRectifyAndComputeDisparity(F_all, cam0, cam1, leftImage, rightImage, ptsLeft, ptsRight); 
 
     return 0;
 }
-
 

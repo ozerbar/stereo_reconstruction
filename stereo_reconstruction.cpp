@@ -566,8 +566,8 @@ void stereoRectifyAndComputeDisparity(const cv::Mat& F, const cv::Mat& K1, const
 int main()
 {
    // 1. load the images
-    std::string leftImagePath  = "/workspace/Datasets/im0.png";
-    std::string rightImagePath = "/workspace/Datasets/im1.png";
+    std::string leftImagePath  = "/workspace/Datasets/artroom1/im0.png";
+    std::string rightImagePath = "/workspace/Datasets/artroom1/im1.png";
 
     cv::Mat leftImage  = cv::imread(leftImagePath, cv::IMREAD_GRAYSCALE);
     cv::Mat rightImage = cv::imread(rightImagePath, cv::IMREAD_GRAYSCALE);

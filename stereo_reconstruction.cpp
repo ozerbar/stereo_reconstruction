@@ -178,89 +178,69 @@ double computeReprojectionError(
 }
 
 
-
-/**
- * @brief Estimate the fundamental matrix using RANSAC
- * @param pointsLeft   All matched points in the left image
- * @param pointsRight  All matched points in the right image
- * @param iterations   Number of RANSAC iterations
- * @param threshold    Epipolar constraint threshold (e.g., 1~3, depends on actual scenario)
- * @return             The best F found by RANSAC
- */
-cv::Mat ransacFundamentalMatrix(
-    const std::vector<cv::Point2f> &pointsLeft,
-    const std::vector<cv::Point2f> &pointsRight,
-    int iterations = 1000,
-    double threshold = 0.5)
+double computeEpipolarError(const cv::Point2f &p1, const cv::Point2f &p2, const cv::Mat &F)
 {
-    // Print the current number of input points
-    std::cout << "[RANSAC] pointsLeft.size() = " << pointsLeft.size() 
-              << ", pointsRight.size() = " << pointsRight.size() << std::endl;
+    // Create a homogeneous coordinate for p1 (in image 1)
+    cv::Mat x1 = (cv::Mat_<double>(3, 1) << p1.x, p1.y, 1.0);
 
-    if (pointsLeft.size() != pointsRight.size() || pointsLeft.size() < 8)
-    {
-        std::cerr << "[ransacFundamentalMatrix] Not enough matching points or mismatch size!" << std::endl;
-        return cv::Mat();
-    }
+    // Calculate the epipolar line in the second image using F
+    cv::Mat line = F * x1; // Line = F * x1 (Epipolar line in the second image)
 
-    int maxInliers = -1;
-    cv::Mat bestF;
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    // The line equation is Ax + By + C = 0, where line = [A B C]
+    double A = line.at<double>(0, 0);
+    double B = line.at<double>(1, 0);
+    double C = line.at<double>(2, 0);
 
-    // Randomly select 8 distinct indices from [0, n-1]
-    std::uniform_int_distribution<> dis(0, static_cast<int>(pointsLeft.size() - 1));
+    // Compute the error between point p2 and the epipolar line
+    double error = std::abs(A * p2.x + B * p2.y + C) / std::sqrt(A * A + B * B);
 
-    for (int iter = 0; iter < iterations; ++iter)
-    {
-        // (1) Randomly pick 8 distinct points
-        std::vector<cv::Point2f> sampleLeft, sampleRight;
-        sampleLeft.reserve(8);
-        sampleRight.reserve(8);
-
-        std::set<int> usedIndices; // Prevent duplicates
-        while ((int)usedIndices.size() < 8)
-        {
-            int idx = dis(gen);
-            usedIndices.insert(idx);
-        }
-        for (auto idx : usedIndices)
-        {
-            sampleLeft.push_back(pointsLeft[idx]);
-            sampleRight.push_back(pointsRight[idx]);
-        }
-
-        // (2) Use these 8 pairs of points to estimate F
-        cv::Mat F_candidate = computeFundamentalMatrix(sampleLeft, sampleRight);
-        if (F_candidate.empty()) 
-            continue;
-
-        // (3) Compute the error for all points and count inliers
-        int inlierCount = 0;
-        for (size_t i = 0; i < pointsLeft.size(); ++i)
-        {
-            cv::Mat x1 = (cv::Mat_<double>(3, 1) << pointsLeft[i].x, pointsLeft[i].y, 1.0);
-            cv::Mat x2 = (cv::Mat_<double>(3, 1) << pointsRight[i].x, pointsRight[i].y, 1.0);
-
-            double error = std::abs(x2.dot(F_candidate * x1));
-            if (error < threshold)
-                inlierCount++;
-        }
-
-        // (4) Update the best F if this has more inliers
-        if (inlierCount > maxInliers)
-        {
-            maxInliers = inlierCount;
-            bestF = F_candidate.clone();
-        }
-    }
-
-    std::cout << "[RANSAC] Max inliers found: " << maxInliers << " / " 
-              << pointsLeft.size() << std::endl;
-    return bestF;
+    return error;
 }
 
+cv::Mat ransacFundamentalMatrix(std::vector<cv::Point2f>& points1, std::vector<cv::Point2f>& points2, int maxIterations, float threshold, int& inlierCount) {
+    int bestInlierCount = 0;
+    cv::Mat bestF;
+    std::vector<cv::Point2f> bestInliers1, bestInliers2;
 
+    srand(time(0));  // Seed the random number generator
+
+   
+    for (int i = 0; i < maxIterations; ++i) {
+        
+        std::vector<cv::Point2f> samplePoints1, samplePoints2;
+        for (int j = 0; j < 8; ++j) {
+            int idx = rand() % points1.size(); 
+            samplePoints1.push_back(points1[idx]);
+            samplePoints2.push_back(points2[idx]);
+        }
+
+       
+        cv::Mat F = computeFundamentalMatrix(samplePoints1, samplePoints2);
+
+       
+        std::vector<cv::Point2f> inliers1, inliers2;
+        int count = 0;
+        for (size_t j = 0; j < points1.size(); ++j) {
+            double error = computeEpipolarError(points1[j], points2[j], F);
+            if (error < threshold) {
+                inliers1.push_back(points1[j]);
+                inliers2.push_back(points2[j]);
+                count++;
+            }
+        }
+
+    
+        if (count > bestInlierCount) {
+            bestInlierCount = count;
+            bestF = F.clone();
+            bestInliers1 = inliers1;
+            bestInliers2 = inliers2;
+        }
+    }
+
+    inlierCount = bestInlierCount;
+    return bestF;  
+}
 /**
  * @brief Compute disparity map from two rectified images using Block Matching
  * @param leftImage     The left rectified image
@@ -565,50 +545,64 @@ void stereoRectifyAndComputeDisparity(const cv::Mat& F, const cv::Mat& K1, const
 
 int main()
 {
-   // 1. load the images
-    std::string leftImagePath  = "/workspace/Datasets/artroom1/im0.png";
-    std::string rightImagePath = "/workspace/Datasets/artroom1/im1.png";
-
-    cv::Mat leftImage  = cv::imread(leftImagePath, cv::IMREAD_GRAYSCALE);
-    cv::Mat rightImage = cv::imread(rightImagePath, cv::IMREAD_GRAYSCALE);
+   // Load images
+    cv::Mat leftImage = cv::imread("/workspace/Datasets/im0.png", cv::IMREAD_COLOR);   // query image
+    cv::Mat rightImage = cv::imread("/workspace/Datasets/im1.png", cv::IMREAD_COLOR); // train image
     if (leftImage.empty() || rightImage.empty())
     {
         std::cerr << "Error: Could not load images." << std::endl;
         return -1;
     }
 
-    // 2. Use ORB to detect and describe features
-    cv::Ptr<cv::ORB> orb = cv::ORB::create();
+    // Initialize variables for keypoints and descriptors
     std::vector<cv::KeyPoint> keypointsLeft, keypointsRight;
     cv::Mat descriptorsLeft, descriptorsRight;
-    orb->detectAndCompute(leftImage,  cv::noArray(), keypointsLeft,  descriptorsLeft);
-    orb->detectAndCompute(rightImage, cv::noArray(), keypointsRight, descriptorsRight);
 
-    // 3. Use BFMatcher for feature matching (note crossCheck=true reduces number of matches)
-    cv::BFMatcher matcher(cv::NORM_HAMMING, true);
+    // Initialize ORB detector
+    cv::Ptr<cv::ORB> orb = cv::ORB::create(500, 1.2f, 8, 31, 0, 2, cv::ORB::HARRIS_SCORE, 31, 20);
+
+    // Detect keypoints
+    orb->detect(leftImage, keypointsLeft);
+    orb->detect(rightImage, keypointsRight);
+
+    // Compute descriptors
+    orb->compute(leftImage, keypointsLeft, descriptorsLeft);
+    orb->compute(rightImage, keypointsRight, descriptorsRight);
+
+    // Match descriptors using Hamming Distance
     std::vector<cv::DMatch> matches;
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
     matcher.match(descriptorsLeft, descriptorsRight, matches);
 
-    // If you want more matches, set crossCheck=false and do more sophisticated filtering
-
-    // 4. Sort matches by distance
-    std::sort(matches.begin(), matches.end(),
-              [](const cv::DMatch &m1, const cv::DMatch &m2)
-              {
-                  return m1.distance < m2.distance;
-              });
-
-    // 5. Extract matched point coordinates
-    std::vector<cv::Point2f> ptsLeft, ptsRight;
-    ptsLeft.reserve(matches.size());
-    ptsRight.reserve(matches.size());
-    for (auto &m : matches)
+    // Select max and min distance, and define the good match
+    double min_dist = 10000, max_dist = 0;
+    for (int i = 0; i < descriptorsLeft.rows; i++)
     {
-        ptsLeft.push_back(keypointsLeft[m.queryIdx].pt);
-        ptsRight.push_back(keypointsRight[m.trainIdx].pt);
+        double dist = matches[i].distance;
+        if (dist < min_dist)
+            min_dist = dist;
+        if (dist > max_dist)
+            max_dist = dist;
     }
-
-    // Ensure we have at least 8 matches for the fundamental matrix
+std::cout<<"the size of matches:"<<matches.size()<<std::endl;
+std::cout<<"the min dist:"<<min_dist<<std::endl;
+    // Filter good matches based on distance
+    std::vector<cv::DMatch> good_matches;
+    for (int i = 0; i < descriptorsLeft.rows; i++)
+    {
+        if (matches[i].distance <= std::max(2 * min_dist, 30.0))
+        {
+            good_matches.push_back(matches[i]);
+        }
+    }
+std::cout<<"the size of good_matches:"<<good_matches.size()<<std::endl;
+// Collect matched points
+    std::vector<cv::Point2f> ptsLeft, ptsRight;
+    for (unsigned int i = 0; i < good_matches.size(); ++i)
+    {
+        ptsLeft.push_back(keypointsLeft[good_matches[i].queryIdx].pt);
+        ptsRight.push_back(keypointsRight[good_matches[i].trainIdx].pt);
+    }
     if (ptsLeft.size() < 8)
     {
         std::cerr << "Error: Not enough matches to compute Fundamental Matrix!" << std::endl;
@@ -617,14 +611,18 @@ int main()
 
     // 6. Estimate F with all matching points (without RANSAC)
     cv::Mat F_all = computeFundamentalMatrix(ptsLeft, ptsRight);
-    std::cout << "[Direct] F estimated from all points: \n" << F_all << std::endl;
-    double error_all = computeReprojectionError(ptsLeft, ptsRight, F_all);
+    std::cout << "[Direct] F estimated from all points: \n"
+              << F_all << std::endl;
+    double error_all = computeReprojectionError(ptsLeft,ptsRight, F_all);
     std::cout << "[Direct] Reprojection error (sum of squares): " << error_all << std::endl;
 
+    int maxIterations = 3000;
+    float threshold = 1.3; // Reprojection error threshold for inliers
+    int inlierCount = 0;
+    cv::Mat F = ransacFundamentalMatrix(ptsLeft,ptsRight, maxIterations, threshold, inlierCount);
     // 7. Estimate F via RANSAC
-    cv::Mat F_ransac = ransacFundamentalMatrix(ptsLeft, ptsRight, /*iterations*/2000, /*threshold*/1.0);
-    std::cout << "[RANSAC] F estimated: \n" << F_ransac << std::endl;
-    double error_ransac = computeReprojectionError(ptsLeft, ptsRight, F_ransac);
+    std::cout << "[RANSAC] F estimated: "<< F << std::endl;
+    double error_ransac = computeReprojectionError(ptsLeft, ptsRight, F);
     std::cout << "[RANSAC] Reprojection error (sum of squares): " << error_ransac << std::endl;
 
     // 8. Visualize some matched points

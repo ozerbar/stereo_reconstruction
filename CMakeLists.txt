@@ -18,32 +18,6 @@ set(HEADERS
     stb_image_write.h
 )
 
-# 1) Executable: keypoint_matching_opencv
-set(SRC_WITH_OPENCV
-    keypoint_matching_with_opencv.cpp
-    ${HEADERS}
-)
-add_executable(keypoint_matching_opencv ${SRC_WITH_OPENCV})
-target_link_libraries(keypoint_matching_opencv
-    Eigen3::Eigen
-    ${OpenCV_LIBS}    # uses OpenCV for keypoint matching
-    flann
-    lz4
-)
-
-# 2) Executable: keypoint_matching_no_opencv
-set(SRC_NO_OPENCV
-    keypoint_matching_without_opencv.cpp
-    ${HEADERS}
-)
-add_executable(keypoint_matching_no_opencv ${SRC_NO_OPENCV})
-target_link_libraries(keypoint_matching_no_opencv
-    Eigen3::Eigen
-    flann
-    lz4
-)
-
-
 # 3) Executable: stereo_reconstruction
 set(SRC_STEREO
     stereo_reconstruction.cpp

@@ -308,8 +308,9 @@ cv::Mat computeDisparitySGBM(const cv::Mat &leftGray, const cv::Mat &rightGray)
 
 
 /* =============================
- * 2) Main: do both Uncalibrated and Calibrated
+ * 2) Main: do both Uncalibrated and Calibrated for rectification and disparity
  * =============================*/
+
 
 int main()
 {
@@ -336,17 +337,18 @@ int main()
         { "BRISK", cv::BRISK::create(), cv::NORM_HAMMING }
     };
 
-    // 3) Camera intrinsics for "calibrated" approach
+    // 3) Suppose we have camera intrinsics for "calibrated" approach
+    //    (Replace these with your actual intrinsics)
     cv::Mat K0 = (cv::Mat_<double>(3,3) << 7228.4,  0,      1112.085,
                                            0,       7228.4, 1010.431,
-                                           0,       0,      1.0 );
+                                           0,       0,      1.0);
     cv::Mat K1 = (cv::Mat_<double>(3,3) << 7228.4,  0,      1628.613,
                                            0,       7228.4, 1010.431,
-                                           0,       0,      1.0 );
+                                           0,       0,      1.0);
     cv::Mat D0 = cv::Mat::zeros(1,5, CV_64F);
     cv::Mat D1 = cv::Mat::zeros(1,5, CV_64F);
 
-    // 4) Loop over each method
+    // 4) Loop over each feature method
     for (auto &method : methods)
     {
         std::cout << "\n========== " << method.name << " ==========\n";
@@ -405,118 +407,105 @@ int main()
         }
         std::cout << "[INFO] " << method.name << " => #inliers=" << inlierCount << "\n";
 
-        /****************************************************************
-         * (1) Uncalibrated Rectification + Disparity
-         ****************************************************************/
-        {
-            // stereoRectifyUncalibrated => H1, H2
-            cv::Mat H1, H2;
-            cv::stereoRectifyUncalibrated(ptsLeft, ptsRight, F, leftImage.size(), H1, H2);
+        /********************************************************
+         * (1) Uncalibrated Rectification
+         ********************************************************/
+        cv::Mat H1, H2;
+        cv::stereoRectifyUncalibrated(ptsLeft, ptsRight, F, leftImage.size(), H1, H2);
 
-            // Warp perspective
-            cv::Mat rectLeftU, rectRightU;
-            cv::warpPerspective(leftImage,  rectLeftU,  H1, leftImage.size());
-            cv::warpPerspective(rightImage, rectRightU, H2, leftImage.size());
+        // Warp perspective
+        cv::Mat rectLeftU, rectRightU;
+        cv::warpPerspective(leftImage,  rectLeftU,  H1, leftImage.size());
+        cv::warpPerspective(rightImage, rectRightU, H2, leftImage.size());
 
-            // Concatenate horizontally
-            cv::Mat stereoUncalib;
-            cv::hconcat(rectLeftU, rectRightU, stereoUncalib);
+        // Concatenate horizontally
+        cv::Mat stereoUncalib;
+        cv::hconcat(rectLeftU, rectRightU, stereoUncalib);
 
-            // Save the horizontally stitched uncalib rectification
-            std::string uncalibName = "uncalib_stereo_concat_" + method.name + ".png";
-            cv::imwrite(uncalibName, stereoUncalib);
+        // Save the horizontally stitched rectified image
+        std::string uncalibName = "uncalib_stereo_concat_" + method.name + ".png";
+        cv::imwrite(uncalibName, stereoUncalib);
+        
+        //disparity map
+        // Convert to gray 
+        cv::Mat rectLeftUGray, rectRightUGray;
+        cv::cvtColor(rectLeftU,   rectLeftUGray,   cv::COLOR_BGR2GRAY);
+        cv::cvtColor(rectRightU,  rectRightUGray,  cv::COLOR_BGR2GRAY);
 
-            // --- (Optional) compute disparity from the uncalibrated rectified pair ---
-            // Convert to gray if needed
-            cv::Mat rectLeftUGray, rectRightUGray;
-            cv::cvtColor(rectLeftU,   rectLeftUGray,   cv::COLOR_BGR2GRAY);
-            cv::cvtColor(rectRightU,  rectRightUGray,  cv::COLOR_BGR2GRAY);
+        // Optionally use CLAHE or other pre-processing
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
+        clahe->apply(rectLeftUGray,  rectLeftUGray);
+        clahe->apply(rectRightUGray, rectRightUGray);
 
-            // Optionally use CLAHE or other pre-processing
-            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
-            clahe->apply(rectLeftUGray,  rectLeftUGray);
-            clahe->apply(rectRightUGray, rectRightUGray);
+        // Compute disparity (SGBM)
+        cv::Mat dispU = computeDisparitySGBM(rectLeftUGray, rectRightUGray);
 
-            // Compute disparity (SGBM)
-            cv::Mat dispU = computeDisparitySGBM(rectLeftUGray, rectRightUGray);
+        // Normalize to 8U for saving
+        double minv, maxv;
+        cv::minMaxLoc(dispU, &minv, &maxv);
+        cv::Mat dispU8;
+        dispU.convertTo(dispU8, CV_8U, 255.0/(maxv - minv + 1e-6));
 
-            // Normalize to 8U for saving
-            double minv, maxv;
-            cv::minMaxLoc(dispU, &minv, &maxv);
-            cv::Mat dispU8;
-            dispU.convertTo(dispU8, CV_8U, 255.0/(maxv - minv + 1e-6));
+        // Save disparity
+        std::string dispUName = "uncalib_disparity_" + method.name + ".png";
+        cv::imwrite(dispUName, dispU8);
 
-            // Save disparity
-            std::string dispUName = "uncalib_disparity_" + method.name + ".png";
-            cv::imwrite(dispUName, dispU8);
-        }
 
-        /****************************************************************
-         * (2) Calibrated Rectification + Disparity
-         ****************************************************************/
-        {
-            // Compute E = K1^T * F * K0
-            cv::Mat E = K1.t() * F * K0;
+        /********************************************************
+         * (2) Calibrated Rectification
+         ********************************************************/
+        // E = K1^T * F * K0
+        cv::Mat E = K1.t() * F * K0;
 
-            // Decompose E => (R, t)
-            cv::Mat bestR, bestT;
-            decomposeEssentialMatrix(E, ptsLeft, ptsRight, K0, bestR, bestT);
+        // Decompose E => (R, t)
+        cv::Mat bestR, bestT;
+        decomposeEssentialMatrix(E, ptsLeft, ptsRight, K0, bestR, bestT);
 
-            // stereoRectify => R1, R2, P1, P2, Q
-            cv::Size imageSize(leftImage.cols, leftImage.rows);
-            cv::Mat RR1, RR2, PP1, PP2, Q;
-            cv::stereoRectify(K0, D0, K1, D1, imageSize,
-                              bestR, bestT, RR1, RR2, PP1, PP2, Q,
-                              cv::CALIB_ZERO_DISPARITY, 0, imageSize);
+        // stereoRectify
+        cv::Size imageSize(leftImage.cols, leftImage.rows);
+        cv::Mat RR1, RR2, PP1, PP2, Q;
+        cv::stereoRectify(K0, D0, K1, D1, imageSize,
+                          bestR, bestT, RR1, RR2, PP1, PP2, Q,
+                          cv::CALIB_ZERO_DISPARITY, 0, imageSize);
 
-            // initUndistortRectifyMap + remap
-            cv::Mat mapxL, mapyL, mapxR, mapyR;
-            cv::initUndistortRectifyMap(K0, D0, RR1, PP1, imageSize, CV_32FC1, mapxL, mapyL);
-            cv::initUndistortRectifyMap(K1, D1, RR2, PP2, imageSize, CV_32FC1, mapxR, mapyR);
+        // initUndistortRectifyMap + remap
+        cv::Mat mapxL, mapyL, mapxR, mapyR;
+        cv::initUndistortRectifyMap(K0, D0, RR1, PP1, imageSize, CV_32FC1, mapxL, mapyL);
+        cv::initUndistortRectifyMap(K1, D1, RR2, PP2, imageSize, CV_32FC1, mapxR, mapyR);
 
-            cv::Mat rectLeftC, rectRightC;
-            cv::remap(leftImage,  rectLeftC,  mapxL, mapyL, cv::INTER_LINEAR);
-            cv::remap(rightImage, rectRightC, mapxR, mapyR, cv::INTER_LINEAR);
+        cv::Mat rectLeftC, rectRightC;
+        cv::remap(leftImage,  rectLeftC,  mapxL, mapyL, cv::INTER_LINEAR);
+        cv::remap(rightImage, rectRightC, mapxR, mapyR, cv::INTER_LINEAR);
 
-            // Concatenate horizontally
-            cv::Mat stereoCalib;
-            cv::hconcat(rectLeftC, rectRightC, stereoCalib);
+        // Concatenate horizontally
+        cv::Mat stereoCalib;
+        cv::hconcat(rectLeftC, rectRightC, stereoCalib);
 
-            // Save the horizontally stitched calibrated rectification
-            std::string calibName = "calib_stereo_concat_" + method.name + ".png";
-            cv::imwrite(calibName, stereoCalib);
+        // Save the horizontally stitched rectified image
+        std::string calibName = "calib_stereo_concat_" + method.name + ".png";
+        cv::imwrite(calibName, stereoCalib);
+        
+        // --- Compute disparity from the calibrated rectified pair ---
+        // Convert to gray
+        cv::Mat rectLeftCGray, rectRightCGray;
+        cv::cvtColor(rectLeftC,   rectLeftCGray,   cv::COLOR_BGR2GRAY);
+        cv::cvtColor(rectRightC,  rectRightCGray,  cv::COLOR_BGR2GRAY);
 
-            // --- Compute disparity from the calibrated rectified pair ---
-            // Convert to gray if needed
-            cv::Mat rectLeftCGray, rectRightCGray;
-            cv::cvtColor(rectLeftC,   rectLeftCGray,   cv::COLOR_BGR2GRAY);
-            cv::cvtColor(rectRightC,  rectRightCGray,  cv::COLOR_BGR2GRAY);
 
-            // Optionally use CLAHE
-            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
-            clahe->apply(rectLeftCGray,  rectLeftCGray);
-            clahe->apply(rectRightCGray, rectRightCGray);
+        // Compute disparity
+        cv::Mat dispC = computeDisparitySGBM(rectLeftCGray, rectRightCGray);
 
-            // Compute disparity
-            cv::Mat dispC = computeDisparitySGBM(rectLeftCGray, rectRightCGray);
+        // Normalize for saving
+        // double minv, maxv;
+        cv::minMaxLoc(dispC, &minv, &maxv);
+        cv::Mat dispC8;
+        dispC.convertTo(dispC8, CV_8U, 255.0/(maxv - minv + 1e-6));
 
-            // Normalize for saving
-            double minv, maxv;
-            cv::minMaxLoc(dispC, &minv, &maxv);
-            cv::Mat dispC8;
-            dispC.convertTo(dispC8, CV_8U, 255.0/(maxv - minv + 1e-6));
+        std::string dispCName = "calib_disparity_" + method.name + ".png";
+        cv::imwrite(dispCName, dispC8);
+    
+    }
 
-            std::string dispCName = "calib_disparity_" + method.name + ".png";
-            cv::imwrite(dispCName, dispC8);
-        }
-
-    } // end for(methods)
-
-    std::cout << "\nDone. Each method produced:\n"
-              << " (1) uncalib_stereo_concat_<method>.png\n"
-              << " (2) uncalib_disparity_<method>.png\n"
-              << " (3) calib_stereo_concat_<method>.png\n"
-              << " (4) calib_disparity_<method>.png\n";
+    std::cout << "\nDone. 6 images (3 methods x 2 rectification) saved.\n";
     return 0;
 }
-

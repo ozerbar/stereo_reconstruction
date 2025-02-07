@@ -296,8 +296,8 @@ cv::Mat computeDisparitySGBM(const cv::Mat &leftGray, const cv::Mat &rightGray)
 {
     cv::Ptr<cv::StereoSGBM> stereo = cv::StereoSGBM::create(
         0,   // minDisparity
-        64,  // numDisparities
-        11   // blockSize
+        128,  // numDisparities
+        23   // blockSize
     );
     // More params can be set if needed
 

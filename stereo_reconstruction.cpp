@@ -1,5 +1,6 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/core.hpp>
@@ -8,17 +9,16 @@
 #include <Eigen/Core>
 #include <Eigen/SVD>
 #include <iostream>
-#include <opencv2/features2d.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/opencv.hpp>
 #include <random>
 #include <vector>
-#include <iomanip> // For setw etc. alignment
-#include <opencv2/calib3d.hpp>  
-#include <opencv2/features2d.hpp> 
-#include <opencv2/ximgproc.hpp>  
-#include <opencv2/imgproc.hpp>
+#include <iomanip>
+#include <cmath>
+#include <opencv2/ximgproc.hpp>
 #include <fstream>
+
+#include "depth_map_generation.h"
+#include "mesh_generation.h"
+
 
 void normalizePoints(const std::vector<cv::Point2f>& points, 
                     std::vector<cv::Point2f>& normalizedPoints,
@@ -38,7 +38,7 @@ void normalizePoints(const std::vector<cv::Point2f>& points,
     avgDist /= points.size();
 
     // Scale factor
-    double scaleFactor = std::sqrt(2) / avgDist;
+    double scaleFactor = std::sqrt(2.0) / avgDist;
 
     // Construct the transformation matrix
     T = (cv::Mat_<double>(3, 3) << scaleFactor, 0, -scaleFactor * center.x,
@@ -54,7 +54,6 @@ void normalizePoints(const std::vector<cv::Point2f>& points,
         normalizedPoints[i].y = p_norm.at<double>(1)/p_norm.at<double>(2);
     }
 }
-
 
 /**
  * @brief Estimate the fundamental matrix F using the 8-point algorithm or an overdetermined linear method
@@ -136,14 +135,12 @@ cv::Mat computeFundamentalMatrix(const std::vector<cv::Point2f> &pointsLeft,
     return F;
 }
 
-
-
 /**
  * @brief Compute epipolar reprojection error: x2^T * F * x1
  * @param pointsLeft   Points from the left image
  * @param pointsRight  Points from the right image
  * @param F            The fundamental matrix
- * @return             Returns the sum of squared errors (example)
+ * @return             Returns the sum of squared errors
  */
 double computeReprojectionError(
     const std::vector<cv::Point2f> &pointsLeft,
@@ -177,7 +174,6 @@ double computeReprojectionError(
     return sum_sq;
 }
 
-
 double computeEpipolarError(const cv::Point2f &p1, const cv::Point2f &p2, const cv::Mat &F)
 {
     // Create a homogeneous coordinate for p1 (in image 1)
@@ -192,11 +188,22 @@ double computeEpipolarError(const cv::Point2f &p1, const cv::Point2f &p2, const 
     double C = line.at<double>(2, 0);
 
     // Compute the error between point p2 and the epipolar line
-    double error = std::abs(A * p2.x + B * p2.y + C) / std::sqrt(A * A + B * B);
+    double denom = A * A + B * B;
+    double sqrt_res = std::sqrt(denom);
+    double error = std::abs(A * p2.x + B * p2.y + C) / sqrt_res;
 
     return error;
 }
 
+/**
+ * @brief Estimate the fundamental matrix using RANSAC to handle outliers
+ * @param points1       Points from the first image
+ * @param points2       Points from the second image
+ * @param maxIterations Maximum number of RANSAC iterations
+ * @param threshold     Epipolar error threshold
+ * @param inlierCount   Reference to an integer that will store the count of inliers
+ * @return              Returns the best estimated fundamental matrix (3x3)
+ */
 cv::Mat ransacFundamentalMatrix(std::vector<cv::Point2f>& points1, std::vector<cv::Point2f>& points2, int maxIterations, float threshold, int& inlierCount) {
     int bestInlierCount = 0;
     cv::Mat bestF;
@@ -241,78 +248,64 @@ cv::Mat ransacFundamentalMatrix(std::vector<cv::Point2f>& points1, std::vector<c
     inlierCount = bestInlierCount;
     return bestF;  
 }
+
 /**
  * @brief Compute disparity map from two rectified images using Block Matching
- * @param leftImage     The left rectified image
- * @param rightImage    The right rectified image
- * @return              The computed disparity map
+ * @param leftImage   rectified left image
+ * @param rightImage  rectified right image
+ * @return            disparity map
  */
 cv::Mat computeDisparityMap(const cv::Mat& leftImage, const cv::Mat& rightImage)
 {
-    // Parameters for block matching (BM)
-    int numDisparities = 16;  // Maximum disparity
-    int blockSize = 9;        // Block size for BM
+    int numDisparities = 16;  
+    int blockSize = 9;        
 
-    // Create StereoBM object for block matching
     cv::Ptr<cv::StereoBM> stereoBM = cv::StereoBM::create(numDisparities, blockSize);
 
-    // Compute disparity map
-    cv::Mat disparity;
+    cv::Mat disparity; 
     stereoBM->compute(leftImage, rightImage, disparity);
 
     return disparity;
 }
 
-
-
 /**
  * @brief Convert disparity map to depth map using camera parameters
- * @param disparity     The disparity map
- * @param focalLength   The focal length (fx) of the camera
- * @param baseline      The baseline (distance between two cameras)
- * @return              The computed depth map
+ * @param disparity    The disparity map
+ * @param focalLength  The focal length (fx)
+ * @param baseline     The baseline
+ * @return             depth map
  */
 cv::Mat computeDepthMap(const cv::Mat& disparity, double focalLength, double baseline)
 {
-    // Initialize the depth map
     cv::Mat depthMap(disparity.size(), CV_64F);
-
-    // Loop through each pixel to calculate depth
-    for (int y = 0; y < disparity.rows; ++y)
-    {
-        for (int x = 0; x < disparity.cols; ++x)
-        {
-            double d = disparity.at<float>(y, x);  // Disparity value at pixel (x, y)
-
-            // Avoid division by zero or very small disparity values
-            if (d > 0)
-            {
-                // Depth = (focalLength * baseline) / disparity
-                double depth = (focalLength * baseline) / d;
+    
+    // First, normalize disparity values to ensure they're in a good range
+    cv::Mat normalizedDisparity;
+    cv::normalize(disparity, normalizedDisparity, 0, 255, cv::NORM_MINMAX, CV_32F);
+    
+    for (int y = 0; y < disparity.rows; ++y) {
+        for (int x = 0; x < disparity.cols; ++x) {
+            double d = normalizedDisparity.at<float>(y, x);
+            if (d > 0) {
+                // Add a small epsilon to avoid division by zero
+                double depth = (focalLength * baseline) / (d + 1e-10);
                 depthMap.at<double>(y, x) = depth;
-            }
-            else
-            {
-                // Assign zero depth to invalid disparity values
+            } else {
                 depthMap.at<double>(y, x) = 0.0;
             }
         }
     }
-
     return depthMap;
 }
 
 
-// ----------------- DECOMPOSE ESSENTIAL MATRIX ----------------- //
-
 /**
  * @brief Check if a 3D point is in front of a camera
- * @param P         The camera projection matrix
- * @param point3D   The 3D point in homogeneous coordinates
- * @return          True if the point is in front of the camera
+ * @param P       The camera projection matrix
+ * @param point3D 3D point in homogeneous coordinates
+ * @return        True if the point is in front of the camera
  */
 bool isInFrontOfCamera(const cv::Mat& P, const cv::Mat& point3D) {
-    // Convert point to homogeneous coordinates if not already
     cv::Mat homogeneous_point;
     if (point3D.rows == 3)
         homogeneous_point = cv::Mat::ones(4, 1, CV_64F);
@@ -323,46 +316,34 @@ bool isInFrontOfCamera(const cv::Mat& P, const cv::Mat& point3D) {
         point3D.copyTo(homogeneous_point.rowRange(0, 3));
     }
 
-    // Project point
     cv::Mat projected = P * homogeneous_point;
-    
-    // Get depth (Z coordinate)
     double depth = projected.at<double>(2) / projected.at<double>(3);
     
     return depth > 0;
 }
 
-
 /**
  * @brief Triangulate a 3D point from two 2D points and two projection matrices
- * @param P1    The projection matrix of the first camera
- * @param P2    The projection matrix of the second camera
- * @param pt1   The first 2D point
- * @param pt2   The second 2D point
- * @return      The triangulated 3D point in homogeneous coordinates
+ * @param P1   Projection matrix of the first camera
+ * @param P2   Projection matrix of the second camera
+ * @param pt1  First 2D point
+ * @param pt2  Second 2D point
+ * @return     3D point in homogeneous coordinates
  */
 cv::Mat triangulatePoint(const cv::Mat& P1, const cv::Mat& P2, 
                         const cv::Point2f& pt1, const cv::Point2f& pt2) {
     cv::Mat A(4, 4, CV_64F);
-    
-    // For first point
     A.row(0) = pt1.x * P1.row(2) - P1.row(0);
     A.row(1) = pt1.y * P1.row(2) - P1.row(1);
-    
-    // For second point
     A.row(2) = pt2.x * P2.row(2) - P2.row(0);
     A.row(3) = pt2.y * P2.row(2) - P2.row(1);
     
     cv::SVD svd(A);
     cv::Mat point3D = svd.vt.row(3).t();
-    
-    // Convert to homogeneous coordinates
     point3D = point3D / point3D.at<double>(3);
     
     return point3D;
 }
-
-
 
 /**
  * @brief Decompose the essential matrix into rotation and translation
@@ -371,8 +352,7 @@ cv::Mat triangulatePoint(const cv::Mat& P1, const cv::Mat& P2,
  * @param points2   Points from the second image
  * @param best_R    The best rotation matrix
  * @param best_t    The best translation vector
- * @note This function tries all possible combinations of R and T to find the best solution
- *       based on the number of points in front of both cameras
+ * @note This function tries all possible combinations of R and T
  */
 void decomposeEssentialMatrix(const cv::Mat& E, 
                             const std::vector<cv::Point2f>& points1,
@@ -384,54 +364,45 @@ void decomposeEssentialMatrix(const cv::Mat& E,
                                           1, 0, 0,
                                           0, 0, 1);
 
-    // Possible rotations and translations
     std::vector<cv::Mat> R_possibilities{
-        svd.u * W * svd.vt,        // R1
-        svd.u * W.t() * svd.vt,    // R2
+        svd.u * W * svd.vt,
+        svd.u * W.t() * svd.vt,
     };
     std::vector<cv::Mat> t_possibilities{
-        svd.u.col(2),              // t1
-        -svd.u.col(2)              // t2
+        svd.u.col(2),
+        -svd.u.col(2)
     };
 
-    // Fix rotation matrices if needed (determinant = 1)
     for (auto& R : R_possibilities) {
         if (cv::determinant(R) < 0) {
             R = -R;
         }
     }
 
-    // Create projection matrix for first camera
     cv::Mat P1 = cv::Mat::eye(4, 4, CV_64F);
-    P1 = P1(cv::Rect(0, 0, 4, 3));  // Take first 3 rows to make 3x4
+    P1 = P1(cv::Rect(0, 0, 4, 3));
 
     int max_points_in_front = 0;
     int best_R_idx = 0;
     int best_t_idx = 0;
 
-    // Test all combinations
     for (size_t r = 0; r < R_possibilities.size(); ++r) {
         for (size_t t = 0; t < t_possibilities.size(); ++t) {
-            // Create second camera projection matrix
             cv::Mat P2 = cv::Mat::eye(4, 4, CV_64F);
             R_possibilities[r].copyTo(P2(cv::Rect(0, 0, 3, 3)));
             t_possibilities[t].copyTo(P2(cv::Rect(3, 0, 1, 3)));
-            P2 = P2(cv::Rect(0, 0, 4, 3));  // Take first 3 rows to make 3x4
+            P2 = P2(cv::Rect(0, 0, 4, 3));
 
             int points_in_front = 0;
             
-            // Check for each points if it is in front of both cameras, and update the best solution for R and T if needed
             for (size_t i = 0; i < points1.size(); ++i) {
                 cv::Mat point3D = triangulatePoint(P1, P2, points1[i], points2[i]);
-                
-                // Check if point is in front of both cameras
                 if (isInFrontOfCamera(P1, point3D) && 
                     isInFrontOfCamera(P2, point3D)) {
                     points_in_front++;
                 }
             }
 
-            // Update best solution 
             if (points_in_front > max_points_in_front) {
                 max_points_in_front = points_in_front;
                 best_R_idx = r;
@@ -440,141 +411,238 @@ void decomposeEssentialMatrix(const cv::Mat& E,
         }
     }
 
-    // Set the best R and t
     best_R = R_possibilities[best_R_idx].clone();
     best_t = t_possibilities[best_t_idx].clone();
 
-    std::cout << "Selected solution has " << max_points_in_front << " points in front of both cameras" 
-              << " out of " << points1.size() << " total points." << std::endl;
+    std::cout << "Selected solution has " << max_points_in_front
+              << " points in front of both cameras out of "
+              << points1.size() << " total points." << std::endl;
 }
-
-// ----------------- END DECOMPOSE ESSENTIAL MATRIX ----------------- //
-
-
 
 /**
  * @brief Perform stereo rectification and compute disparity map from stereo images
- * @param F           The fundamental matrix between the two cameras
+ * @param F           The fundamental matrix
  * @param K1          The intrinsic matrix of the left camera
  * @param K2          The intrinsic matrix of the right camera
  * @param leftImage   The left input image
  * @param rightImage  The right input image
- * @note              This function first computes the essential matrix from the fundamental matrix 
- *                    and intrinsic matrices, then uses SVD to extract the rotation and translation
- *                    matrices for stereo rectification. After rectifying the images, it computes 
- *                    the disparity map using the Block Matching (BM) algorithm.
+ * @note              This function first computes the essential matrix from F and K1, K2,
+ *                    then uses SVD to extract the rotation and translation. After rectifying,
+ *                    it computes disparity using block matching.
  */
-void stereoRectifyAndComputeDisparity(const cv::Mat& F, const cv::Mat& K1, const cv::Mat& K2,
+cv::Mat stereoRectifyAndComputeDisparity(const cv::Mat& F, const cv::Mat& K1, const cv::Mat& K2,
                                       const cv::Mat& leftImage, const cv::Mat& rightImage,
                                       const std::vector<cv::Point2f>& pointsLeft,
-                                      const std::vector<cv::Point2f>& pointsRight)
+                                      const std::vector<cv::Point2f>& pointsRight, 
+                                      std::string path)
 {
-    // 1. Compute the essential matrix E from the fundamental matrix F and camera matrices K1, K2
     cv::Mat E = K2.t() * F * K1;
     std::cout << "Essential matrix E:\n" << E << std::endl;
 
-    // 2. Use SVD to decompose E into rotation and translation (R and T)
-    // cv::SVD svd(E);
-    // cv::Mat U = svd.u, S = svd.w, Vt = svd.vt;
-
-    // cv::Mat R = U * cv::Mat::eye(3, 3, CV_64F) * Vt;
-    // cv::Mat T = U.col(2);
-    
-    // NEW: Decompose essential matrix into R and T with trying out all combinations of R and T
     cv::Mat T, R;
     decomposeEssentialMatrix(E, pointsLeft, pointsRight, R, T);
 
     std::cout << "Rotation matrix R:\n" << R << std::endl;
     std::cout << "Translation vector T:\n" << T << std::endl;
 
-
-    // 3. Perform stereo rectification (R1, R2, P1, P2, Q)
-    // DEBUG: Add error checking for matrix types and dimensions
     CV_Assert(!K1.empty() && !K2.empty() && K1.size() == cv::Size(3,3) && K2.size() == cv::Size(3,3));
     CV_Assert(!leftImage.empty() && !rightImage.empty());
 
-    // DEBUG
     std::cout << "Debug Image size: " << leftImage.size() << std::endl;
     std::cout << "Debug K1: " << K1.type() << " size: " << K1.size() << std::endl;
     std::cout << "Debug K2: " << K2.type() << " size: " << K2.size() << std::endl;
 
-    cv::Mat R1, R2, P1, P2, Q;  // rectification/rotation matrices (R1, R2), projection matrices (P1, P2), disparity-to-depth mapping matrix (Q)
-    
+    cv::Mat R1, R2, P1, P2, Q;
     try {
-        cv::stereoRectify(K1, cv::Mat(), K2, cv::Mat(), leftImage.size(), R, T, R1, R2, P1, P2, Q, cv::CALIB_ZERO_DISPARITY, 1.0);
+        cv::stereoRectify(K1, cv::Mat(), K2, cv::Mat(), leftImage.size(), R, T,
+                          R1, R2, P1, P2, Q, cv::CALIB_ZERO_DISPARITY, 1.0);
 
-        // DEBUG
         std::cout << "Debug R1: " << R1.size() << " type: " << R1.type() << std::endl;
         std::cout << "Debug P1: " << P1.size() << " type: " << P1.type() << std::endl;
 
-
-        // 4. Rectify the images using initUndistortRectifyMap and remap
         cv::Mat map1x, map1y, map2x, map2y;
-
-        // cv::Mat K1_float, K2_float;
-        // K1.convertTo(K1_float, CV_32F);
-        // K2.convertTo(K2_float, CV_32F);
-
-        cv::initUndistortRectifyMap(K1, cv::Mat(), R1, P1, leftImage.size(), CV_32FC1, map1x, map1y); 
-        cv::initUndistortRectifyMap(K2, cv::Mat(), R2, P2, rightImage.size(), CV_32FC1, map2x, map2y);
+        cv::initUndistortRectifyMap(K1, cv::Mat(), R1, P1,
+                                    leftImage.size(), CV_32FC1, map1x, map1y); 
+        cv::initUndistortRectifyMap(K2, cv::Mat(), R2, P2,
+                                    rightImage.size(), CV_32FC1, map2x, map2y);
 
         cv::Mat rectifiedLeft, rectifiedRight;
         cv::remap(leftImage, rectifiedLeft, map1x, map1y, cv::INTER_LINEAR);
         cv::remap(rightImage, rectifiedRight, map2x, map2y, cv::INTER_LINEAR);
 
-        // 5. Compute the disparity map using block matching
         cv::Mat disparity = computeDisparityMap(rectifiedLeft, rectifiedRight);
-        
-        // 6. Display the rectified images and disparity map
-        //如果没有安装qt插件,就不能使用imshow在线预览,因此改为了直接写入文件,可以在本地查看
-        // cv::imshow("Rectified Left", rectifiedLeft);
-        // cv::imshow("Rectified Right", rectifiedRight);
-        // cv::imshow("Disparity", disparity);
-        // cv::waitKey(0);
 
-        cv::imwrite("results/rectified_left.jpg", rectifiedLeft);
-        cv::imwrite("results/rectified_right.jpg", rectifiedRight);
-        cv::imwrite("results/disparity_map.jpg", disparity);
+        // Create stitched image
+        cv::Mat stitched(
+            rectifiedLeft.rows,
+            rectifiedLeft.cols + rectifiedRight.cols,
+            rectifiedLeft.type()
+        );
+        rectifiedLeft.copyTo(
+            stitched(cv::Rect(0, 0, rectifiedLeft.cols, rectifiedLeft.rows))
+        );
+        rectifiedRight.copyTo(
+            stitched(cv::Rect(rectifiedLeft.cols, 0, rectifiedRight.cols, rectifiedRight.rows))
+        );
+
+        for (size_t i = 0; i < pointsLeft.size(); ++i)
+        {
+            float xL = pointsLeft[i].x;
+            float yL = pointsLeft[i].y;
+            if (xL < 0 || xL >= map1x.cols || yL < 0 || yL >= map1x.rows) continue;
+
+            float rectLx = map1x.at<float>((int) yL, (int) xL);
+            float rectLy = map1y.at<float>((int) yL, (int) xL);
+
+            float xR = pointsRight[i].x;
+            float yR = pointsRight[i].y;
+            if (xR < 0 || xR >= map2x.cols || yR < 0 || yR >= map2x.rows) continue;
+
+            float rectRx = map2x.at<float>((int) yR, (int) xR);
+            float rectRy = map2y.at<float>((int) yR, (int) xR);
+
+            rectRx += static_cast<float>(rectifiedLeft.cols);
+
+            cv::circle(stitched, cv::Point2f(rectLx, rectLy), 4, cv::Scalar(0, 255, 0), -1);
+            cv::circle(stitched, cv::Point2f(rectRx, rectRy), 4, cv::Scalar(0, 255, 0), -1);
+
+            cv::line(
+                stitched,
+                cv::Point2f(rectLx, rectLy),
+                cv::Point2f(rectRx, rectRy),
+                cv::Scalar(255, 0, 0),
+                2
+            );
+        }
+        cv::imwrite(path + "_rectified_stitched_matches.jpg", stitched);
+
+        cv::imwrite(path + "_rectified_left.jpg", rectifiedLeft);
+        cv::imwrite(path + "_rectified_right.jpg", rectifiedRight);
+        cv::imwrite(path + "_disparity_map.jpg", disparity);
+        std::cout<<"disparity map has outputed successfully"<<std::endl;
+        return disparity;
     }
     catch (const cv::Exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
     }
+    return cv::Mat();
+}
+
+
+cv::Mat createDepthVis(cv::Mat depthMap) {
+    // Find valid depth range
+    double minVal, maxVal;
+    cv::minMaxLoc(depthMap, &minVal, &maxVal, nullptr, nullptr, depthMap > 0);
+
+    // Remove outliers (values too far from median)
+    cv::Mat mask = depthMap > 0;
+    std::vector<float> validDepths;
+    for(int y = 0; y < depthMap.rows; y++) {
+        for(int x = 0; x < depthMap.cols; x++) {
+            if(mask.at<uint8_t>(y,x)) {
+                validDepths.push_back(depthMap.at<float>(y,x));
+            }
+        }
+    }
+
+    std::sort(validDepths.begin(), validDepths.end());
+    float Q1 = validDepths[validDepths.size() * 0.25];
+    float Q3 = validDepths[validDepths.size() * 0.75];
+    float IQR = Q3 - Q1;
+    float lowerBound = Q1 - 1.5 * IQR;
+    float upperBound = Q3 + 1.5 * IQR;
+
+    // Create visualization with outlier removal
+    cv::Mat normalized;
+    depthMap.copyTo(normalized);
+    normalized.setTo(0, depthMap < lowerBound);
+    normalized.setTo(0, depthMap > upperBound);
+
+    // Normalize valid depths
+    cv::normalize(normalized, normalized, 0, 255, cv::NORM_MINMAX, CV_8UC1, normalized > 0);
+
+    // Apply color mapping
+    cv::Mat colorized;
+    cv::applyColorMap(normalized, colorized, cv::COLORMAP_VIRIDIS); // Try VIRIDIS for better depth perception
+
+    // Make invalid points black
+    colorized.setTo(cv::Scalar(0,0,0), normalized == 0);
+
+    // Optional: Apply slight Gaussian blur for smoother visualization
+    cv::GaussianBlur(colorized, colorized, cv::Size(3,3), 0);
+
+    return colorized;
+}
+
+
+cv::Mat computeDepthMap2(const cv::Mat& disparity, double focalLength, double baseline) {
+    cv::Mat depthMap(disparity.size(), CV_64F);
+
+    // First pass: compute raw depth values
+    for (int y = 0; y < disparity.rows; ++y) {
+        for (int x = 0; x < disparity.cols; ++x) {
+            float d = disparity.at<float>(y, x);
+            if (d > 0) {
+                depthMap.at<double>(y, x) = (focalLength * baseline) / d;
+            } else {
+                depthMap.at<double>(y, x) = 0.0;
+            }
+        }
+    }
+
+    // Filter out noise and fill small holes
+    cv::Mat filteredDepth;
+
+    // Apply bilateral filter to reduce noise while preserving edges
+    // cv::Mat temp;
+    // depthMap.convertTo(temp, CV_32F);
+    // cv::bilateralFilter(temp, filteredDepth, 7, 50, 50);
+
+    // Fill small holes using morphological operations
+    cv::Mat mask = (filteredDepth > 0);
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
+
+    // Inpaint remaining small holes
+    cv::Mat inpainted;
+    cv::inpaint(filteredDepth, ~mask, inpainted, 3, cv::INPAINT_TELEA);
+
+    return createDepthVis(inpainted);
 }
 
 
 
-int main()
-{
-   // Load images
-    cv::Mat leftImage = cv::imread("/workspace/Datasets/im0.png", cv::IMREAD_COLOR);   // query image
-    cv::Mat rightImage = cv::imread("/workspace/Datasets/im1.png", cv::IMREAD_COLOR); // train image
+
+int pipeline() {
+     std::string dataset = "artroom1";
+    std::string path = "/workspace/Datasets/" + dataset + "/";
+    cv::Mat leftImage = cv::imread(path + "im0.png", cv::IMREAD_GRAYSCALE);
+    cv::Mat rightImage = cv::imread(path + "im1.png", cv::IMREAD_GRAYSCALE);
     if (leftImage.empty() || rightImage.empty())
     {
         std::cerr << "Error: Could not load images." << std::endl;
         return -1;
     }
 
-    // Initialize variables for keypoints and descriptors
+    double baseline = 0.53662;
+    double focalLength = 1733.74;
+
     std::vector<cv::KeyPoint> keypointsLeft, keypointsRight;
     cv::Mat descriptorsLeft, descriptorsRight;
 
-    // Initialize ORB detector
-    cv::Ptr<cv::ORB> orb = cv::ORB::create(500, 1.2f, 8, 31, 0, 2, cv::ORB::HARRIS_SCORE, 31, 20);
+    cv::Ptr<cv::ORB> orb = cv::ORB::create(500, 1.2f, 8, 31, 0, 2,
+                                           cv::ORB::HARRIS_SCORE, 31, 20);
 
-    // Detect keypoints
     orb->detect(leftImage, keypointsLeft);
     orb->detect(rightImage, keypointsRight);
 
-    // Compute descriptors
     orb->compute(leftImage, keypointsLeft, descriptorsLeft);
     orb->compute(rightImage, keypointsRight, descriptorsRight);
 
-    // Match descriptors using Hamming Distance
     std::vector<cv::DMatch> matches;
     cv::BFMatcher matcher(cv::NORM_HAMMING);
     matcher.match(descriptorsLeft, descriptorsRight, matches);
 
-    // Select max and min distance, and define the good match
     double min_dist = 10000, max_dist = 0;
     for (int i = 0; i < descriptorsLeft.rows; i++)
     {
@@ -584,9 +652,9 @@ int main()
         if (dist > max_dist)
             max_dist = dist;
     }
-std::cout<<"the size of matches:"<<matches.size()<<std::endl;
-std::cout<<"the min dist:"<<min_dist<<std::endl;
-    // Filter good matches based on distance
+    std::cout<<"the size of matches:"<<matches.size()<<std::endl;
+    std::cout<<"the min dist:"<<min_dist<<std::endl;
+
     std::vector<cv::DMatch> good_matches;
     for (int i = 0; i < descriptorsLeft.rows; i++)
     {
@@ -595,8 +663,8 @@ std::cout<<"the min dist:"<<min_dist<<std::endl;
             good_matches.push_back(matches[i]);
         }
     }
-std::cout<<"the size of good_matches:"<<good_matches.size()<<std::endl;
-// Collect matched points
+    std::cout<<"the size of good_matches:"<<good_matches.size()<<std::endl;
+
     std::vector<cv::Point2f> ptsLeft, ptsRight;
     for (unsigned int i = 0; i < good_matches.size(); ++i)
     {
@@ -609,24 +677,24 @@ std::cout<<"the size of good_matches:"<<good_matches.size()<<std::endl;
         return -1;
     }
 
-    // 6. Estimate F with all matching points (without RANSAC)
     cv::Mat F_all = computeFundamentalMatrix(ptsLeft, ptsRight);
     std::cout << "[Direct] F estimated from all points: \n"
               << F_all << std::endl;
-    double error_all = computeReprojectionError(ptsLeft,ptsRight, F_all);
+    double error_all = computeReprojectionError(ptsLeft, ptsRight, F_all);
     std::cout << "[Direct] Reprojection error (sum of squares): " << error_all << std::endl;
 
     int maxIterations = 3000;
-    float threshold = 1.3; // Reprojection error threshold for inliers
+    float threshold = 1.3;
     int inlierCount = 0;
-    cv::Mat F = ransacFundamentalMatrix(ptsLeft,ptsRight, maxIterations, threshold, inlierCount);
-    // 7. Estimate F via RANSAC
+
+    cv::Mat F = ransacFundamentalMatrix(ptsLeft, ptsRight, maxIterations, threshold, inlierCount);
     std::cout << "[RANSAC] F estimated: "<< F << std::endl;
     double error_ransac = computeReprojectionError(ptsLeft, ptsRight, F);
-    std::cout << "[RANSAC] Reprojection error (sum of squares): " << error_ransac << std::endl;
+    std::cout << "[RANSAC] Reprojection error (sum of squares): " << ptsLeft.size() << std::endl;
+    std::cout << "The Number of total matched point pairs: " << inlierCount<< std::endl;
+    std::cout << "The Number of Inlier: " << inlierCount<< std::endl;
 
-    // 8. Visualize some matched points
-    const int numMatchesToDraw = 10; // e.g., draw 10 matches
+    const int numMatchesToDraw = 10;
     std::vector<cv::DMatch> topMatches(matches.begin(),
                                        matches.begin() + std::min<int>(matches.size(), numMatchesToDraw));
 
@@ -638,48 +706,125 @@ std::cout<<"the size of good_matches:"<<good_matches.size()<<std::endl;
                     std::vector<char>(),
                     cv::DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
 
-    // Draw thicker lines as a demonstration
     for (auto &m : topMatches)
     {
         cv::Point2f ptLeft  = keypointsLeft[m.queryIdx].pt;
         cv::Point2f ptRight = keypointsRight[m.trainIdx].pt;
-        // Since we draw on a single image, shift the right image's coordinates by leftImage.cols
         ptRight.x += (float)leftImage.cols;
 
         cv::line(matchImage, ptLeft, ptRight, cv::Scalar(0, 255, 0), 2);
     }
 
-    // 9. Save the visualization
-    std::string outputPath = "output_with_opencv.jpg";
-    if (!cv::imwrite(outputPath, matchImage))
-    {
-        std::cerr << "Error: Could not save the match image." << std::endl;
-        return -1;
-    }
+    std::string outputPath = "results/" + dataset + "_keypoints_with_opencv.jpg";
+    cv::imwrite(outputPath, matchImage);
+    // if (!cv::imwrite(outputPath, matchImage))
+    // {
+    //     std::cerr << "Error: Could not save the match image." << std::endl;
+    //    return -1;
+    // }
     std::cout << "Match image saved to " << outputPath << std::endl;
-  
 
-    // 10. Load camera intrinsics directly
-cv::Mat cam0 = (cv::Mat_<double>(3, 3) << 
-    1758.23, 0, 953.34,  
-    0, 1758.23, 552.29, 
-    0, 0, 1);             
+    cv::Mat cam0 = (cv::Mat_<double>(3, 3) <<
+        1758.23, 0, 953.34,
+        0, 1758.23, 552.29,
+        0, 0, 1);
 
-cv::Mat cam1 = (cv::Mat_<double>(3, 3) << 
-    1758.23, 0, 953.34,  
-    0, 1758.23, 552.29,  
-    0, 0, 1);             
+    cv::Mat cam1 = (cv::Mat_<double>(3, 3) <<
+        1758.23, 0, 953.34,
+        0, 1758.23, 552.29,
+        0, 0, 1);
 
-// Camera parameters are now directly stored in cam0 and cam1
-std::cout << "Camera intrinsics for cam0:\n" 
-          << "fx=" << cam0.at<double>(0, 0) << ", fy=" << cam0.at<double>(1, 1) 
-          << ", cx=" << cam0.at<double>(0, 2) << ", cy=" << cam0.at<double>(1, 2) << std::endl;
+    std::cout << "Camera intrinsics for cam0:\n"
+              << "fx=" << cam0.at<double>(0, 0) << ", fy=" << cam0.at<double>(1, 1)
+              << ", cx=" << cam0.at<double>(0, 2) << ", cy=" << cam0.at<double>(1, 2) << std::endl;
+
+    std::string resultPath = "results/" + dataset ;
+    cv::Mat disparity = stereoRectifyAndComputeDisparity(F_all, cam0, cam1, leftImage, rightImage, ptsLeft, ptsRight, resultPath);
+
+    // load disparity map from jpg image
+    cv::Mat disparity_cor = imread("/workspace/disparity_image.jpg", cv::IMREAD_GRAYSCALE);
+
+    // Compute and visualize depth map
+    cv::Mat depthMap = computeDepthMap2(disparity_cor, 1733.74, 0.53662);
+
+    // cv::Mat depthColor = createDepthVis(depthMap);
+
+
+    /*
+    // Normalize the depth map to ensure good visualization
+    cv::Mat normalizedDepthMap;
+    cv::normalize(depthMap, normalizedDepthMap, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+
+    // Apply bilateral filter to reduce noise while preserving edges
+    cv::Mat filtered;
+    cv::bilateralFilter(normalizedDepthMap, filtered, 9, 75, 75);
+
+    // double minVal, maxVal;
+    // cv::minMaxLoc(depthMap, &minVal, &maxVal);
+
+    // cv::Mat depth8U;
+    // depthMap.convertTo(depth8U, CV_8UC1, 255.0 / (maxVal + 1e-6));
+
+    cv::Mat depthColor;
+    cv::applyColorMap(filtered, depthColor, cv::COLORMAP_JET);
+    */
+
+    cv::imwrite(resultPath + "_depth_map_color.jpg", depthMap);
+    std::cout << "Depth map successfully output " << std::endl;
+
+    return 0;
+
+}
+
+
+int main()
+{
+    cv::Mat cam0 = (cv::Mat_<double>(3, 3) <<
+        1758.23, 0, 953.34,
+        0, 1758.23, 552.29,
+        0, 0, 1);
+
+    cv::Mat cam1 = (cv::Mat_<double>(3, 3) <<
+        1758.23, 0, 953.34,
+        0, 1758.23, 552.29,
+        0, 0, 1);
+
+    std::string dataset = "artroom1";
+    float focal_length = 1733.74;
+    float baseline = 536.62;
+
+    std::string disparity_gt_path = "/workspace/Datasets/" + dataset + "/disp0.pfm";
+    cv::Mat disparity_gt = readPFM(disparity_gt_path);
+
+    // Print information about the disparity map
+    std::cout << "Disparity map info:" << std::endl;
+    std::cout << "Size: " << disparity_gt.size() << std::endl;
+    std::cout << "Type: " << disparity_gt.type() << std::endl;
+
+    // Check value range
+    double minVal, maxVal;
+    cv::minMaxLoc(disparity_gt, &minVal, &maxVal);
+    std::cout << "[DISP] Min value: " << minVal << std::endl;
+    std::cout << "[DISP] Max value: " << maxVal << std::endl;
+
+
+    // --- Create visualization with proper (gray) scaling
+    cv::Mat disparity_vis;
+    std::string disparity_out_path = "/workspace/results/" + dataset + "_disparity_from_pfm.png";
+    cv::minMaxLoc(disparity_gt, &minVal, &maxVal);
+    disparity_gt.convertTo(disparity_vis, CV_32F, 1.0/(maxVal - minVal), -minVal/(maxVal - minVal));
+    disparity_vis.convertTo(disparity_vis, CV_8UC1, 255.0);
+    // do not use "disparity_vis" for depth calculation because disp values are relative
+    cv::imwrite(disparity_out_path, disparity_vis);
 
 
 
-    // 11. Perform stereo rectification and compute disparity 
-    stereoRectifyAndComputeDisparity(F_all, cam0, cam1, leftImage, rightImage, ptsLeft, ptsRight); 
+    // --- convert to depth map
+    std::string depth_map_out_path = "/workspace/results/" + dataset + "_depth_map.png";
+    cv::Mat depth_map = computeDepthMapAndVis(disparity_gt, focal_length, baseline, depth_map_out_path);
+
+    std::string mesh_output_path = "/workspace/results/" + dataset + "_mesh.off";
+    generateMeshFromDepth(depth_map, cam0, dataset);
 
     return 0;
 }
-

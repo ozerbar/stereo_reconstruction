@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.10)
 
 project(stereo_reconstruction)
 
@@ -21,6 +21,9 @@ set(HEADERS
 # 3) Executable: stereo_reconstruction
 set(SRC_STEREO
     stereo_reconstruction.cpp
+    sgbm/sgbm.cpp
+    sbm/sbm.cpp
+    fast_sgbm/fast_sgbm.cpp  # Ensure this line is included
     ${HEADERS}
 )
 add_executable(stereo_reconstruction ${SRC_STEREO})
@@ -30,17 +33,4 @@ target_link_libraries(stereo_reconstruction
     flann
     lz4
 )
-
-
-
-
-# To build the 'main.cpp' for stereo_reconstruction:
-# set(SOURCES main.cpp ${HEADERS})
-# add_executable(stereo_reconstruction ${SOURCES})
-# target_link_libraries(stereo_reconstruction
-#     Eigen3::Eigen
-#     ${OpenCV_LIBS}
-#     flann
-#     lz4
-# )
 

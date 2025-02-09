@@ -210,6 +210,14 @@ int main()
         myWarpPerspective(leftImage,  rectLeftC,  H_left,  leftImage.size());
         myWarpPerspective(rightImage, rectRightC, H_right, leftImage.size());
 
+        // Concatenate horizontally
+        cv::Mat stereoCalib;
+        cv::hconcat(rectLeftC, rectRightC, stereoCalib);
+
+        // Save the horizontally stitched rectified image
+        std::string calibName = "calib_stereo_concat_" + method.name + ".png";
+        cv::imwrite(calibName, stereoCalib);
+
         // (2) Convert to gray
         cv::Mat rectLeftCGray, rectRightCGray;
         cv::cvtColor(rectLeftC,  rectLeftCGray,  cv::COLOR_BGR2GRAY);

@@ -13,9 +13,7 @@ include_directories(${OpenCV_INCLUDE_DIRS} ${FLANN_INCLUDE_DIRS} ${EIGEN3_INCLUD
 
 # Common headers
 set(HEADERS
-    Eigen.h
-    stb_image.h
-    stb_image_write.h
+    includes/Eigen.h
 )
 
 # 3) Executable: stereo_reconstruction

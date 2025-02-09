@@ -21,9 +21,7 @@ set(HEADERS
 # 3) Executable: stereo_reconstruction
 set(SRC_STEREO
     stereo_reconstruction.cpp
-    sgbm/sgbm.cpp
-    sbm/sbm.cpp
-    fast_sgbm/fast_sgbm.cpp  # Ensure this line is included
+    includes/fast_sgbm/fast_sgbm.cpp
     ${HEADERS}
 )
 add_executable(stereo_reconstruction ${SRC_STEREO})

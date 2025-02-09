@@ -3,6 +3,7 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/calib3d.hpp>
 #include <Eigen/Dense>
+#include "fast_sgbm/fast_sgbm.h" // Include custom FastSGBM header
 
 #include <vector>
 #include <iostream>
@@ -291,6 +292,16 @@ void decomposeEssentialMatrix(const cv::Mat& E,
               << "\nInFrontCount=" << maxInFront << "/" << pts1.size() << std::endl;
 }
 
+// /* ==========  SGBM disparity function ========== */
+// cv::Mat computeDisparitySGBM(const cv::Mat &leftGray, const cv::Mat &rightGray)
+// {
+//     cv::Ptr<cv::StereoSGBM> stereo = cv::StereoSGBM::create(
+//         0,   // minDisparity
+//         128,  // numDisparities
+//         23   // blockSize
+//     );
+//     // More params can be set if needed
+
 // Custom implementation of warpPerspective (bilinear interpolation)
 void myWarpPerspective(const cv::Mat &src, cv::Mat &dst, const cv::Mat &H, cv::Size dsize)
 {
@@ -347,20 +358,17 @@ void myWarpPerspective(const cv::Mat &src, cv::Mat &dst, const cv::Mat &H, cv::S
 }
 
 
-/* ==========  SGBM disparity function ========== */
-cv::Mat computeDisparitySGBM(const cv::Mat &leftGray, const cv::Mat &rightGray)
-{
-    cv::Ptr<cv::StereoSGBM> stereo = cv::StereoSGBM::create(
-        0,   // minDisparity
-        128,  // numDisparities
-        23   // blockSize
-    );
-    // More params can be set if needed
+/* ==========  FastSGBM disparity function ========== */
 
+// Add a new function to use the custom FastSGBM implementation
+cv::Mat computeDisparityFastSGBM(cv::Mat &leftGray, cv::Mat &rightGray, int dispRange, int p1, int p2)
+{
+    FastSGBM sgbm(leftGray.rows, leftGray.cols, dispRange, p1, p2, true);
     cv::Mat disparity;
-    stereo->compute(leftGray, rightGray, disparity);
+    sgbm.compute_disp(leftGray, rightGray, disparity);
     return disparity;
 }
+
 
 
 /* =============================
@@ -466,98 +474,97 @@ int main()
         /********************************************************
          * (1) Uncalibrated Rectification
          ********************************************************/
-        cv::Mat H1, H2;
-        cv::stereoRectifyUncalibrated(ptsLeft, ptsRight, F, leftImage.size(), H1, H2);
+        // cv::Mat H1, H2;
+        // cv::stereoRectifyUncalibrated(ptsLeft, ptsRight, F, leftImage.size(), H1, H2);
 
-        // Warp perspective
-        cv::Mat rectLeftU, rectRightU;
-        cv::warpPerspective(leftImage,  rectLeftU,  H1, leftImage.size());
-        cv::warpPerspective(rightImage, rectRightU, H2, leftImage.size());
+        // // Warp perspective
+        // cv::Mat rectLeftU, rectRightU;
+        // cv::warpPerspective(leftImage,  rectLeftU,  H1, leftImage.size());
+        // cv::warpPerspective(rightImage, rectRightU, H2, leftImage.size());
 
-        // Concatenate horizontally
-        cv::Mat stereoUncalib;
-        cv::hconcat(rectLeftU, rectRightU, stereoUncalib);
+        // // Concatenate horizontally
+        // cv::Mat stereoUncalib;
+        // cv::hconcat(rectLeftU, rectRightU, stereoUncalib);
 
-        // Save the horizontally stitched rectified image
-        std::string uncalibName = "uncalib_stereo_concat_" + method.name + ".png";
-        cv::imwrite(uncalibName, stereoUncalib);
+        // // Save the horizontally stitched rectified image
+        // std::string uncalibName = "uncalib_stereo_concat_" + method.name + ".png";
+        // cv::imwrite(uncalibName, stereoUncalib);
         
-        //disparity map
-        // Convert to gray 
-        cv::Mat rectLeftUGray, rectRightUGray;
-        cv::cvtColor(rectLeftU,   rectLeftUGray,   cv::COLOR_BGR2GRAY);
-        cv::cvtColor(rectRightU,  rectRightUGray,  cv::COLOR_BGR2GRAY);
+        // //disparity map
+        // // Convert to gray 
+        // cv::Mat rectLeftUGray, rectRightUGray;
+        // cv::cvtColor(rectLeftU,   rectLeftUGray,   cv::COLOR_BGR2GRAY);
+        // cv::cvtColor(rectRightU,  rectRightUGray,  cv::COLOR_BGR2GRAY);
 
-        // Optionally use CLAHE or other pre-processing
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
-        clahe->apply(rectLeftUGray,  rectLeftUGray);
-        clahe->apply(rectRightUGray, rectRightUGray);
+        // // Optionally use CLAHE or other pre-processing
+        // cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
+        // clahe->apply(rectLeftUGray,  rectLeftUGray);
+        // clahe->apply(rectRightUGray, rectRightUGray);
 
-        // Compute disparity (SGBM)
-        cv::Mat dispU = computeDisparitySGBM(rectLeftUGray, rectRightUGray);
+        // // Compute disparity (SGBM)
+        // cv::Mat dispU = computeDisparitySGBM(rectLeftUGray, rectRightUGray);
 
-        // Normalize to 8U for saving
-        double minv, maxv;
-        cv::minMaxLoc(dispU, &minv, &maxv);
-        cv::Mat dispU8;
-        dispU.convertTo(dispU8, CV_8U, 255.0/(maxv - minv + 1e-6));
+        // // Normalize to 8U for saving
+        // double minv, maxv;
+        // cv::minMaxLoc(dispU, &minv, &maxv);
+        // cv::Mat dispU8;
+        // dispU.convertTo(dispU8, CV_8U, 255.0/(maxv - minv + 1e-6));
 
-        // Save disparity
-        std::string dispUName = "uncalib_disparity_" + method.name + ".png";
-        cv::imwrite(dispUName, dispU8);
-
-
+        // // Save disparity
+        // std::string dispUName = "uncalib_disparity_" + method.name + ".png";
+        // cv::imwrite(dispUName, dispU8);
 
 
         /********************************************************
          * (2) Calibrated Rectification (Own Implementation)
          ********************************************************/
         // Compute the Essential matrix using the calibrated intrinsics and F
+        // (1) Compute the homographies H_left, H_right as you do:
         cv::Mat E = K1.t() * F * K0;
-
-        // Decompose E to get (R, t) (SVD-based function)
         cv::Mat bestR, bestT;
         decomposeEssentialMatrix(E, ptsLeft, ptsRight, K0, bestR, bestT);
 
-        // Construct the left projection matrix: [K0 | 0]
+        // Left: P_left = K0 * [I|0], Right: P_right = K1 * [R|t]
         cv::Mat P_left = cv::Mat::zeros(3, 4, CV_64F);
-        K0.copyTo(P_left(cv::Rect(0, 0, 3, 3)));  // [K0, 0]
+        K0.copyTo(P_left(cv::Rect(0, 0, 3, 3)));  // top-left 3×3 submatrix
 
-        // Construct the right projection matrix: P_right = K1 * [bestR | bestT]
         cv::Mat RT;
         cv::hconcat(bestR, bestT, RT);
         cv::Mat P_right = K1 * RT;
 
-        // Compute rectification homographies:
-        // H = (3x3 submatrix of projection matrix) * inv(K)
+        // Rectify homographies
         cv::Mat H_left  = P_left(cv::Rect(0, 0, 3, 3)) * K0.inv();
         cv::Mat H_right = P_right(cv::Rect(0, 0, 3, 3)) * K1.inv();
 
-        // Warp the images using the computed homographies
+        // Warp
         cv::Mat rectLeftC, rectRightC;
         myWarpPerspective(leftImage,  rectLeftC,  H_left,  leftImage.size());
-        myWarpPerspective(rightImage, rectRightC, H_right, rightImage.size());
+        myWarpPerspective(rightImage, rectRightC, H_right, leftImage.size());
 
-        // cv::warpPerspective(leftImage,  rectLeftC,  H_left,  leftImage.size());
-        // cv::warpPerspective(rightImage, rectRightC, H_right, rightImage.size());
-
-        // Concatenate horizontally and save the calibrated rectified image
-        cv::Mat stereoCalib;
-        cv::hconcat(rectLeftC, rectRightC, stereoCalib);
-        std::string calibName = "calib_stereo_concat_" + method.name + ".png";
-        cv::imwrite(calibName, stereoCalib);
-
-        // Compute disparity for the calibrated rectification (same as before)
+        // (2) Convert to gray
         cv::Mat rectLeftCGray, rectRightCGray;
         cv::cvtColor(rectLeftC,  rectLeftCGray,  cv::COLOR_BGR2GRAY);
         cv::cvtColor(rectRightC, rectRightCGray, cv::COLOR_BGR2GRAY);
-        cv::Mat dispC = computeDisparitySGBM(rectLeftCGray, rectRightCGray);
+
+        // (3) If you want to save memory or speed up, downscale these *rectified* images:
+        cv::Mat rectLeftCGraySmall, rectRightCGraySmall;
+        cv::resize(rectLeftCGray,  rectLeftCGraySmall,  cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
+        cv::resize(rectRightCGray, rectRightCGraySmall, cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
+
+        // (4) Compute disparity on the smaller rectified images
+        int dispRange = 64;
+        int p1 = 2, p2 = 5;
+        cv::Mat dispC = computeDisparityFastSGBM(rectLeftCGraySmall, rectRightCGraySmall, dispRange, p1, p2);
+
+        // (5) Rescale disparity to 8-bit for saving
         double minv2, maxv2;
         cv::minMaxLoc(dispC, &minv2, &maxv2);
         cv::Mat dispC8;
-        dispC.convertTo(dispC8, CV_8U, 255.0/(maxv2 - minv2 + 1e-6));
+        dispC.convertTo(dispC8, CV_8U, 255.0 / (maxv2 - minv2 + 1e-6));
+
         std::string dispCName = "calib_disparity_" + method.name + ".png";
         cv::imwrite(dispCName, dispC8);
+
 
 
     //     /********************************************************

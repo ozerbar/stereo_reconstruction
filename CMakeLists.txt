@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.10)
 
 project(stereo_reconstruction)
 
@@ -13,40 +13,13 @@ include_directories(${OpenCV_INCLUDE_DIRS} ${FLANN_INCLUDE_DIRS} ${EIGEN3_INCLUD
 
 # Common headers
 set(HEADERS
-    Eigen.h
-    stb_image.h
-    stb_image_write.h
+    includes/Eigen.h
 )
-
-# 1) Executable: keypoint_matching_opencv
-set(SRC_WITH_OPENCV
-    keypoint_matching_with_opencv.cpp
-    ${HEADERS}
-)
-add_executable(keypoint_matching_opencv ${SRC_WITH_OPENCV})
-target_link_libraries(keypoint_matching_opencv
-    Eigen3::Eigen
-    ${OpenCV_LIBS}    # uses OpenCV for keypoint matching
-    flann
-    lz4
-)
-
-# 2) Executable: keypoint_matching_no_opencv
-set(SRC_NO_OPENCV
-    keypoint_matching_without_opencv.cpp
-    ${HEADERS}
-)
-add_executable(keypoint_matching_no_opencv ${SRC_NO_OPENCV})
-target_link_libraries(keypoint_matching_no_opencv
-    Eigen3::Eigen
-    flann
-    lz4
-)
-
 
 # 3) Executable: stereo_reconstruction
 set(SRC_STEREO
     stereo_reconstruction.cpp
+    includes/fast_sgbm/fast_sgbm.cpp
     ${HEADERS}
 )
 add_executable(stereo_reconstruction ${SRC_STEREO})
@@ -56,17 +29,4 @@ target_link_libraries(stereo_reconstruction
     flann
     lz4
 )
-
-
-
-
-# To build the 'main.cpp' for stereo_reconstruction:
-# set(SOURCES main.cpp ${HEADERS})
-# add_executable(stereo_reconstruction ${SOURCES})
-# target_link_libraries(stereo_reconstruction
-#     Eigen3::Eigen
-#     ${OpenCV_LIBS}
-#     flann
-#     lz4
-# )
 

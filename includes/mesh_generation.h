@@ -34,11 +34,13 @@ struct Triangle {
  * @param K           Camera intrinsic matrix
  * @return vector of 3D vertices
  */
-inline std::vector<Vertex> depthMapToPointCloud(const cv::Mat& depthMap, const cv::Mat& K) {
-    std::vector<Vertex> vertices(depthMap.rows * depthMap.cols);  // Preallocate with grid size
+inline std::vector<Vertex> depthMapToPointCloud(
+    const cv::Mat& depthMap, const cv::Mat& K,
+    const float threshold_lower_bound,
+    const float threshold_upper_bound)
+{
 
-    const float threshold_lower_bound = 0.1f;
-    const float threshold_upper_bound = 20.0f;
+    std::vector<Vertex> vertices(depthMap.rows * depthMap.cols);  // Preallocate with grid size
 
     float fx = K.at<double>(0, 0);
     float fy = K.at<double>(1, 1);
@@ -91,7 +93,6 @@ inline bool isTriangleValid(const Vertex& v0, const Vertex& v1, const Vertex& v2
                           isEdgeValid(v1, v2, edgeThreshold);
 
         return edgesValid;  // Ensure non-zero area
-
     }
     return false;
 }
@@ -337,8 +338,12 @@ inline void savePLYPointCloud(const std::string& filename, const std::vector<Ver
  * @param depthMap    Input depth map
  * @param K           Camera intrinsic matrix
  * @param dataset     dataset name
+ * @param upperDistanceThreshold
+ * @param lowerDistanceThreshold
  */
-inline void generateMeshFromDepth(const cv::Mat& depthMap, const cv::Mat& K, const std::string& dataset) {
+inline void generateMeshFromDepth(
+    const cv::Mat& depthMap, const cv::Mat& K, const std::string& dataset,
+    const float upperDistanceThreshold, const float lowerDistanceThreshold) {
     // Add some debug info
     cv::Mat depth_valid;
     cv::threshold(depthMap, depth_valid, 0.1, 1, cv::THRESH_BINARY);
@@ -346,13 +351,13 @@ inline void generateMeshFromDepth(const cv::Mat& depthMap, const cv::Mat& K, con
     // Sample some depth values
     for(int y = 0; y < depthMap.rows; y += depthMap.rows/4) {
         for(int x = 0; x < depthMap.cols; x += depthMap.cols/4) {
-            std::cout << "Depth at (" << x << "," << y << "): "
+            std::cout << "[DEPTH] Depth at (" << x << "," << y << "): "
                       << depthMap.at<float>(y,x) << std::endl;
         }
     }
 
     // Convert depth map to point cloud and save point cloud for visualization
-    std::vector<Vertex> vertices = depthMapToPointCloud(depthMap, K);
+    std::vector<Vertex> vertices = depthMapToPointCloud(depthMap, K, lowerDistanceThreshold, upperDistanceThreshold);
     std::string pcOtputPath = "/workspace/results/" + dataset + "_pointclouds.ply";
     savePLYPointCloud(pcOtputPath, vertices);
 

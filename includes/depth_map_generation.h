@@ -27,39 +27,49 @@
 #include <fstream>
 #include <arpa/inet.h>
 
-inline cv::Mat computeDepthMapAndVis(const cv::Mat& disparity, double focalLength, double baseline, const std::string& outputPath) {
-    // cv::Mat depthMap(disparity.size(), CV_64F);
+inline cv::Mat computeDepthMapAndVis(
+    const cv::Mat& disparity, double focalLength, double baseline,
+    const std::string& outputPath,
+    const float upperDistanceThreshold, const float lowerDistThreshold)
+{
+
     float threshold = 0.01;
 
+    // using the absolute disparity map to only consider the magnitude of disparity and not
+    // the direction -> can lead to false negatives for (negative) depth values
+    cv::Mat disparity_abs = abs(disparity);
+
     // mask out all valid disparity values
-    cv::Mat mask = disparity > threshold;
+    cv::Mat mask = disparity_abs > threshold;
 
     // copy depth map to new valid depth map
-    cv::Mat depth = cv::Mat::zeros(disparity.size(), CV_32F);
+    cv::Mat depth = cv::Mat::zeros(disparity_abs.size(), CV_32F);
     cv::Mat validDisparity;
-    disparity.copyTo(validDisparity, mask);
+    disparity_abs.copyTo(validDisparity, mask);
 
     // compute valid depth values from valid disparity values
     cv::divide(baseline * focalLength, validDisparity, depth, 1.0, CV_32F);
 
+    double minVal, maxVal;
+    cv::minMaxLoc(depth, &minVal, &maxVal);
+    std::cout << "[DEPTH] Min value depth in mm before filtering: " << minVal << std::endl;
+    std::cout << "[DEPTH] Max value depth in mm before filtering: " << maxVal << std::endl;
+
     // Set invalid/infinite depth values to 0
     // count number of 0 values in depth map
-
+    depth = depth / 1000.0f;
     depth.setTo(0, ~mask);  // Set masked-out areas to 0
     depth.setTo(0, depth == std::numeric_limits<float>::infinity());
-    depth.setTo(0, depth < 200.0);    // closer than 20cm
-    depth.setTo(0, depth > 20000.0);  // farther than 20m
+    depth.setTo(0, depth < lowerDistThreshold);    // closer than 20cm
+    depth.setTo(0, depth > upperDistanceThreshold);  // farther than 20m
 
-    depth = depth / 1000.0f;
-
-    double minVal, maxVal;
     cv::minMaxLoc(depth, &minVal, &maxVal);
     std::cout << "[DEPTH] Min value depth in m: " << minVal << std::endl;
     std::cout << "[DEPTH] Max value depth in m: " << maxVal << std::endl;
     // Count valid depth points
     cv::Mat valid_mask = depth > 0;
     int valid_points = cv::countNonZero(valid_mask);
-    std::cout << "[DEPTH] Number of valid depth points: " << valid_points << std::endl;
+    std::cout << "[DEPTH] Number of depth points > 0: " << valid_points << std::endl;
 
     // Normalize for visualization
     cv::Mat depth_vis;
@@ -97,6 +107,7 @@ inline cv::Mat readPFM(const std::string& filename) {
     file >> scale;
     file.ignore(1); // Skip newline
     bool bigEndian = (scale > 0.0f);
+    std::cout << "Scale factor: " << scale << std::endl;
     // scale = std::abs(scale);
 
     // Create matrix to store the data

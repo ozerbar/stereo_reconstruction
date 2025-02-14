@@ -11,6 +11,37 @@
 #include "includes/common.hpp"
 #include "includes/depth_map_generation.h"
 #include "includes/mesh_generation.h"
+double computeReprojectionError(
+    const std::vector<cv::Point2f> &pointsLeft,
+    const std::vector<cv::Point2f> &pointsRight,
+    const cv::Mat &F)
+{
+    if (pointsLeft.size() != pointsRight.size())
+    {
+        std::cerr << "[computeReprojectionError] Mismatch in points size!" << std::endl;
+        return -1.0;
+    }
+
+    std::vector<double> errors;
+    errors.reserve(pointsLeft.size());
+
+    for (size_t i = 0; i < pointsLeft.size(); ++i)
+    {
+        cv::Mat x1 = (cv::Mat_<double>(3, 1) << pointsLeft[i].x, pointsLeft[i].y, 1.0);
+        cv::Mat x2 = (cv::Mat_<double>(3, 1) << pointsRight[i].x, pointsRight[i].y, 1.0);
+
+        // The epipolar constraint error: | x2^T * F * x1 |
+        double error = std::abs(x2.dot(F * x1));
+        errors.push_back(error);
+    }
+
+    // Here we simply return the sum of squares
+    double sum_sq = 0.0;
+    for (auto &e : errors)
+        sum_sq += (e * e);
+
+    return sum_sq;
+}
 //Based on the Ransac to compute the F->the threshold for Shopvac dataset 
 cv::Mat processFeatureMethod(const std::string &method,
                              std::vector<cv::Point2f> &pointsLeft,

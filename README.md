@@ -102,5 +102,5 @@ Adjust the distance thresholds (`upperDistanceThreshold` and `lowerDistanceThres
 
 - Ensure that the image paths and dataset configurations are correct; otherwise, the program will report errors when loading images.
 - Some functions (e.g., `ransacFundamentalMatrix`, `decomposeEssentialMatrix`, `myWarpPerspective`) are implemented in separate header/source files—make sure these files are available in your build.
-- Depending on your dataset and application scenario, you might need to fine-tune algorithm parameters (such as the number of RANSAC iterations or disparity computation parameters).
+- Depending on dataset and application scenario, might need to fine-tune algorithm parameters (such as the number of RANSAC iterations or disparity computation parameters).
 

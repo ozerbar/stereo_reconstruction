@@ -3,35 +3,29 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/calib3d.hpp>
 #include <Eigen/Dense>
-
-
 #include <vector>
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
-
 #include "includes/common.hpp"
-#include "includes/mesh_eval.h"
+#include "includes/depth_map_generation.h"
+#include "includes/mesh_generation.h"
 
+// Compute disparity map using OpenCV's built-in StereoSGBM algorithm
+cv::Mat computeDisparitySGBM(const cv::Mat &leftGray, const cv::Mat &rightGray)
+{
+    cv::Ptr<cv::StereoSGBM> stereo = cv::StereoSGBM::create(
+        0,    // minDisparity
+        128,  // numDisparities
+        23    // blockSize
+    );
+    cv::Mat disparity;
+    stereo->compute(leftGray, rightGray, disparity);
+    return disparity;
+}
 
-
-
-// /* ==========  SGBM disparity function ========== */
-// cv::Mat computeDisparitySGBM(const cv::Mat &leftGray, const cv::Mat &rightGray)
-// {
-//     cv::Ptr<cv::StereoSGBM> stereo = cv::StereoSGBM::create(
-//         0,   // minDisparity
-//         128,  // numDisparities
-//         23   // blockSize
-//     );
-//     // More params can be set if needed
-
-
-
-/* ==========  FastSGBM disparity function ========== */
-
-// Add a new function to use the custom FastSGBM implementation
+// Compute disparity map using a custom FastSGBM implementation
 cv::Mat computeDisparityFastSGBM(cv::Mat &leftGray, cv::Mat &rightGray, int dispRange, int p1, int p2)
 {
     FastSGBM sgbm(leftGray.rows, leftGray.cols, dispRange, p1, p2, true);
@@ -40,123 +34,178 @@ cv::Mat computeDisparityFastSGBM(cv::Mat &leftGray, cv::Mat &rightGray, int disp
     return disparity;
 }
 
+// Find the minimal bounding rectangle that encloses all non-black pixels.
+static cv::Rect findNonBlackROI(const cv::Mat &img)
+{
+    int minx = img.cols, miny = img.rows;
+    int maxx = -1, maxy = -1;
+    for (int y = 0; y < img.rows; y++)
+    {
+        const uchar* rowPtr = img.ptr<uchar>(y);
+        for (int x = 0; x < img.cols; x++)
+        {
+            int b = rowPtr[3 * x + 0];
+            int g = rowPtr[3 * x + 1];
+            int r = rowPtr[3 * x + 2];
+            if (b != 0 || g != 0 || r != 0)
+            {
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
+            }
+        }
+    }
+    if (maxx < 0 || maxy < 0)
+        return cv::Rect(0, 0, 1, 1);
+    return cv::Rect(minx, miny, maxx - minx + 1, maxy - miny + 1);
+}
 
+// Apply a homography transformation to an image and return the transformed corner points.
+cv::Mat warpWithBoundingRect(const cv::Mat &img, const cv::Mat &H, std::vector<cv::Point2f> &cornersOut)
+{
+    std::vector<cv::Point2f> cornersIn = { 
+        cv::Point2f(0.f, 0.f),
+        cv::Point2f(static_cast<float>(img.cols), 0.f),
+        cv::Point2f(static_cast<float>(img.cols), static_cast<float>(img.rows)),
+        cv::Point2f(0.f, static_cast<float>(img.rows))
+    };
+    std::vector<cv::Point2f> cornersTrans;
+    cv::perspectiveTransform(cornersIn, cornersTrans, H);
+    cornersOut = cornersTrans;
+    // Currently returns an empty image; warpPerspective can be adjusted later based on the bounding rectangle.
+    return cv::Mat();
+}
 
-/* =============================
- * 2) Main: do both Uncalibrated and Calibrated for rectification and disparity
- * =============================*/
-
+// Compute the union bounding rectangle of multiple sets of points and construct a translation matrix T (3x3)
+// so that the top-left corner of the union rectangle is at (0, 0).
+cv::Rect computeUnionBoundingRectAndShift(
+    const std::vector<std::vector<cv::Point2f>> &allCorners,
+    cv::Mat &T)
+{
+    float minX = 1e10f, minY = 1e10f;
+    float maxX = -1e10f, maxY = -1e10f;
+    for (auto &corners : allCorners)
+    {
+        for (auto &pt : corners)
+        {
+            if (pt.x < minX) minX = pt.x;
+            if (pt.y < minY) minY = pt.y;
+            if (pt.x > maxX) maxX = pt.x;
+            if (pt.y > maxY) maxY = pt.y;
+        }
+    }
+    int width  = static_cast<int>(std::ceil(maxX - minX));
+    int height = static_cast<int>(std::ceil(maxY - minY));
+    T = cv::Mat::eye(3, 3, CV_64F);
+    T.at<double>(0,2) = -minX;
+    T.at<double>(1,2) = -minY;
+    return cv::Rect(0, 0, width, height);
+}
 
 int main()
 {
+    // Dataset configuration: choose "Shopvac_imperfect" or "artroom1"
+    std::string dataset = "Shopvac_imperfect";
+    // Automatically set image paths, camera intrinsics, focal length, and baseline based on the dataset
+    std::string leftImagePath, rightImagePath;
+    cv::Mat K0, K1;
+    cv::Mat D0, D1;
+    float focal_length, baseline;
+    if(dataset == "Shopvac_imperfect")
+    {
+        leftImagePath = "../Datasets/Shopvac-imperfect/im0.png";
+        rightImagePath = "../Datasets/Shopvac-imperfect/im1.png";
+        K0 = (cv::Mat_<double>(3,3) << 7228.4, 0, 1112.085,
+                                        0, 7228.4, 1010.431,
+                                        0, 0, 1.0);
+        K1 = (cv::Mat_<double>(3,3) << 7228.4, 0, 1628.613,
+                                        0, 7228.4, 1010.431,
+                                        0, 0, 1.0);
+        focal_length = 7228.4;
+        baseline = 379.965;
+    }
+    else if(dataset == "artroom1")
+    {
+        leftImagePath = "../Datasets/artroom1/im0.png";
+        rightImagePath = "../Datasets/artroom1/im1.png";
+        K0 = (cv::Mat_<double>(3,3) << 1733.74, 0, 792.27,
+                                        0, 1733.74, 541.89,
+                                        0, 0, 1.0);
+        K1 = (cv::Mat_<double>(3,3) << 1733.74, 0, 792.27,
+                                        0, 1733.74, 541.89,
+                                        0, 0, 1.0);
+        focal_length = 1733.74;
+        baseline = 536.62;
+    }
+    // Set distortion parameters (all zeros in this case)
+    D0 = cv::Mat::zeros(1,5,CV_64F);
+    D1 = cv::Mat::zeros(1,5,CV_64F);
 
-    // 1) Load images
-    std::string dataset = "shopvac_imperfect";
-    std::string leftImagePath  = "../Datasets/" + dataset + "/im0.png";
-    std::string rightImagePath = "../Datasets/" + dataset + "/im1.png";
+    // Parameters for depth map and mesh generation
+    float upperDistanceThreshold = 50.0;
+    float lowerDistanceThreshold = 0.1;
 
-    cv::Mat leftImage  = cv::imread(leftImagePath,  cv::IMREAD_COLOR);
+    // Load left and right images
+    cv::Mat leftImage  = cv::imread(leftImagePath, cv::IMREAD_COLOR);
     cv::Mat rightImage = cv::imread(rightImagePath, cv::IMREAD_COLOR);
     if (leftImage.empty() || rightImage.empty()) {
         std::cerr << "[Error] Failed to load images.\n";
         return -1;
     }
 
-    // 2) Define feature methods
+    // Define feature extraction methods along with their matching norms
     struct FeatureMethod {
         std::string name;
         cv::Ptr<cv::Feature2D> extractor;
         int normType;
     };
     std::vector<FeatureMethod> methods = {
-        // TODO: set the feature method you would like to use
-        // { "ORB",   cv::ORB::create(),   cv::NORM_HAMMING },
-        // { "SIFT",  cv::SIFT::create(),  cv::NORM_L2      },
+        { "ORB",   cv::ORB::create(),   cv::NORM_HAMMING },
+        { "SIFT",  cv::SIFT::create(),  cv::NORM_L2      },
         { "BRISK", cv::BRISK::create(), cv::NORM_HAMMING }
     };
 
-    // 3) Suppose we have camera intrinsics for "calibrated" approach
-    //    (Replace these with your actual intrinsics)
-
-
-    // shopvac
-    cv::Mat K0 = (cv::Mat_<double>(3,3) << 7228.4,  0,      1112.085,
-                                           0,       7228.4, 1010.431,
-                                           0,       0,      1.0);
-    cv::Mat K1 = (cv::Mat_<double>(3,3) << 7228.4,  0,      1628.613,
-                                           0,       7228.4, 1010.431,
-                                           0,       0,      1.0);
-
-    // artroom
-    /*cv::Mat K0 = (cv::Mat_<double>(3,3) << 1733.74, 0, 792.27,
-                                                        0, 1733.74, 541.89,
-                                                        0, 0, 1);
-    cv::Mat K1 = (cv::Mat_<double>(3,3) << 1733.74, 0, 792.27,
-                                                        0, 1733.74, 541.89,
-                                                        0, 0, 1);
-    */
-
-    cv::Mat D0 = cv::Mat::zeros(1,5, CV_64F);
-    cv::Mat D1 = cv::Mat::zeros(1,5, CV_64F);
-
-    // 3.5) TODO: Define parameters for depth map and mesh generation
-    float focal_length = 7228.4;    // focal length of the camera
-    float baseline = 379.965;   // baseline of the scene
-    float upperDistanceThreshold = 50.0;    // upper distance threshold for depth map generation
-    float lowerDistanceThreshold = 0.1;     // lower distance threshold for depth map computation
-    float edgeThreshold = 0.02;     // max distance between two points so that they form an edge
-
-
-    // 4) Loop over each feature method
+    // Process each feature extraction method
     for (auto &method : methods) {
         std::cout << "\n========== " << method.name << " ==========\n";
 
-        // (a) Detect and compute descriptors
+        // Step (a): Compute keypoints and descriptors
         cv::Mat leftGray, rightGray;
-        cv::cvtColor(leftImage,  leftGray,  cv::COLOR_BGR2GRAY);
+        cv::cvtColor(leftImage, leftGray, cv::COLOR_BGR2GRAY);
         cv::cvtColor(rightImage, rightGray, cv::COLOR_BGR2GRAY);
-
         std::vector<cv::KeyPoint> kpLeft, kpRight;
         cv::Mat descLeft, descRight;
-        method.extractor->detectAndCompute(leftGray,  cv::noArray(), kpLeft,  descLeft);
+        method.extractor->detectAndCompute(leftGray, cv::noArray(), kpLeft, descLeft);
         method.extractor->detectAndCompute(rightGray, cv::noArray(), kpRight, descRight);
         if (descLeft.empty() || descRight.empty()) {
             std::cerr << "[WARN] " << method.name << ": no descriptors.\n";
             continue;
         }
 
-        // (b) KNN match + ratio test
+        // Step (b): KNN matching followed by a ratio test
         cv::Ptr<cv::DescriptorMatcher> matcher = cv::BFMatcher::create(method.normType, false);
         std::vector<std::vector<cv::DMatch>> knn;
         matcher->knnMatch(descLeft, descRight, knn, 2);
-
         std::vector<cv::DMatch> goodMatches;
         double ratioThresh = 0.75;
         for (auto &m : knn) {
-            if (m.size() == 2) {
-                float dist1 = m[0].distance;
-                float dist2 = m[1].distance;
-                if (dist1 < ratioThresh * dist2) {
-                    goodMatches.push_back(m[0]);
-                }
-            }
+            if (m.size() == 2 && m[0].distance < ratioThresh * m[1].distance)
+                goodMatches.push_back(m[0]);
         }
-
         if (goodMatches.size() < 8) {
             std::cerr << "[WARN] " << method.name << ": Not enough good matches.\n";
             continue;
         }
 
-        // (c) Collect matched points
+        // Step (c): Collect matching points from both images
         std::vector<cv::Point2f> ptsLeft, ptsRight;
-        ptsLeft.reserve(goodMatches.size());
-        ptsRight.reserve(goodMatches.size());
         for (auto &gm : goodMatches) {
-            ptsLeft.push_back( kpLeft[gm.queryIdx].pt );
-            ptsRight.push_back(kpRight[gm.trainIdx].pt );
+            ptsLeft.push_back(kpLeft[gm.queryIdx].pt);
+            ptsRight.push_back(kpRight[gm.trainIdx].pt);
         }
 
-        // (d) RANSAC => Fundamental matrix
+        // Step (d): Estimate the fundamental matrix F using RANSAC
         int inlierCount = 0;
         cv::Mat F = ransacFundamentalMatrix(ptsLeft, ptsRight, 5000, 1.5f, inlierCount);
         if (F.empty()) {
@@ -165,213 +214,143 @@ int main()
         }
         std::cout << "[INFO] " << method.name << " => #inliers=" << inlierCount << "\n";
 
-        /********************************************************
-         * (1) Uncalibrated Rectification
-         ********************************************************/
-        // cv::Mat H1, H2;
-        // cv::stereoRectifyUncalibrated(ptsLeft, ptsRight, F, leftImage.size(), H1, H2);
-
-        // // Warp perspective
-        // cv::Mat rectLeftU, rectRightU;
-        // cv::warpPerspective(leftImage,  rectLeftU,  H1, leftImage.size());
-        // cv::warpPerspective(rightImage, rectRightU, H2, leftImage.size());
-
-        // // Concatenate horizontally
-        // cv::Mat stereoUncalib;
-        // cv::hconcat(rectLeftU, rectRightU, stereoUncalib);
-
-        // // Save the horizontally stitched rectified image
-        // std::string uncalibName = "uncalib_stereo_concat_" + method.name + ".png";
-        // cv::imwrite(uncalibName, stereoUncalib);
-
-        // //disparity map
-        // // Convert to gray
-        // cv::Mat rectLeftUGray, rectRightUGray;
-        // cv::cvtColor(rectLeftU,   rectLeftUGray,   cv::COLOR_BGR2GRAY);
-        // cv::cvtColor(rectRightU,  rectRightUGray,  cv::COLOR_BGR2GRAY);
-
-        // // Optionally use CLAHE or other pre-processing
-        // cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
-        // clahe->apply(rectLeftUGray,  rectLeftUGray);
-        // clahe->apply(rectRightUGray, rectRightUGray);
-
-        // // Compute disparity (SGBM)
-        // cv::Mat dispU = computeDisparitySGBM(rectLeftUGray, rectRightUGray);
-
-        // // Normalize to 8U for saving
-        // double minv, maxv;
-        // cv::minMaxLoc(dispU, &minv, &maxv);
-        // cv::Mat dispU8;
-        // dispU.convertTo(dispU8, CV_8U, 255.0/(maxv - minv + 1e-6));
-
-        // // Save disparity
-        // std::string dispUName = "uncalib_disparity_" + method.name + ".png";
-        // cv::imwrite(dispUName, dispU8);
-
-
-        /********************************************************
-         * (2) Calibrated Rectification and Disparity Computation (Own Implementation)
-         ********************************************************/
-        // Compute the Essential matrix using the calibrated intrinsics and F
-        // (1) Compute the homographies H_left, H_right as you do:
-        cv::Mat E = K1.t() * F * K0;
-        cv::Mat bestR, bestT;
-        decomposeEssentialMatrix(E, ptsLeft, ptsRight, K0, bestR, bestT);
-
-        // Left: P_left = K0 * [I|0], Right: P_right = K1 * [R|t]
-        cv::Mat P_left = cv::Mat::zeros(3, 4, CV_64F);
-        K0.copyTo(P_left(cv::Rect(0, 0, 3, 3)));  // top-left 3×3 submatrix
-
-        cv::Mat RT;
-        cv::hconcat(bestR, bestT, RT);
-        cv::Mat P_right = K1 * RT;
-
-        // Rectify homographies
-        cv::Mat H_left  = P_left(cv::Rect(0, 0, 3, 3)) * K0.inv();
-        cv::Mat H_right = P_right(cv::Rect(0, 0, 3, 3)) * K1.inv();
-
-        // Warp
-        cv::Mat rectLeftC, rectRightC;
-        myWarpPerspective(leftImage,  rectLeftC,  H_left,  leftImage.size());
-        myWarpPerspective(rightImage, rectRightC, H_right, leftImage.size());
-
-        // Concatenate horizontally
-        cv::Mat stereoCalib;
-        cv::hconcat(rectLeftC, rectRightC, stereoCalib);
-
-        // Save the horizontally stitched rectified image
-        std::string calibName = "calib_stereo_concat_" + method.name + ".png";
-        cv::imwrite(calibName, stereoCalib);
-
-        // (2) Convert to gray
-        cv::Mat rectLeftCGray, rectRightCGray;
-        cv::cvtColor(rectLeftC,  rectLeftCGray,  cv::COLOR_BGR2GRAY);
-        cv::cvtColor(rectRightC, rectRightCGray, cv::COLOR_BGR2GRAY);
-
-        // (3) If you want to save memory or speed up, downscale these *rectified* images:
-        cv::Mat rectLeftCGraySmall, rectRightCGraySmall;
-        cv::resize(rectLeftCGray,  rectLeftCGraySmall,  cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
-        cv::resize(rectRightCGray, rectRightCGraySmall, cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
-
-        // (4) Compute disparity on the smaller rectified images
-        int dispRange = 64;
-        int p1 = 2, p2 = 5;
-        cv::Mat dispC = computeDisparityFastSGBM(rectLeftCGraySmall, rectRightCGraySmall, dispRange, p1, p2);
-
-        // (5) Rescale disparity to 8-bit for saving
-        double minv2, maxv2;
-        cv::minMaxLoc(dispC, &minv2, &maxv2);
-        cv::Mat dispC8;
-        dispC.convertTo(dispC8, CV_8U, 255.0 / (maxv2 - minv2 + 1e-6));
-
-        std::string dispCName = "calib_disparity_" + method.name + ".png";
-        cv::imwrite(dispCName, dispC8);
-
-
-
-        //     /********************************************************
-        //      * (2) Calibrated Rectification - Opencv implementation
-        //      ********************************************************/
-        //     // E = K1^T * F * K0
-        //     cv::Mat E = K1.t() * F * K0;
-
-        //     // Decompose E => (R, t)
-        //     cv::Mat bestR, bestT;
-        //     decomposeEssentialMatrix(E, ptsLeft, ptsRight, K0, bestR, bestT);
-
-        //     // stereoRectify
-        //     cv::Size imageSize(leftImage.cols, leftImage.rows);
-        //     cv::Mat RR1, RR2, PP1, PP2, Q;
-        //     cv::stereoRectify(K0, D0, K1, D1, imageSize,
-        //                       bestR, bestT, RR1, RR2, PP1, PP2, Q,
-        //                       0, -1, imageSize);
-
-        //     // initUndistortRectifyMap + remap
-        //     cv::Mat mapxL, mapyL, mapxR, mapyR;
-        //     cv::initUndistortRectifyMap(K0, D0, RR1, PP1, imageSize, CV_32FC1, mapxL, mapyL);
-        //     cv::initUndistortRectifyMap(K1, D1, RR2, PP2, imageSize, CV_32FC1, mapxR, mapyR);
-
-        //     cv::Mat rectLeftC, rectRightC;
-        //     cv::remap(leftImage,  rectLeftC,  mapxL, mapyL, cv::INTER_LINEAR);
-        //     cv::remap(rightImage, rectRightC, mapxR, mapyR, cv::INTER_LINEAR);
-
-        //     // Concatenate horizontally
-        //     cv::Mat stereoCalib;
-        //     cv::hconcat(rectLeftC, rectRightC, stereoCalib);
-
-        //     // Save the horizontally stitched rectified image
-        //     std::string calibName = "calib_stereo_concat_" + method.name + ".png";
-        //     cv::imwrite(calibName, stereoCalib);
-
-        //     // --- Compute disparity from the calibrated rectified pair ---
-        //     // Convert to gray
-        //     cv::Mat rectLeftCGray, rectRightCGray;
-        //     cv::cvtColor(rectLeftC,   rectLeftCGray,   cv::COLOR_BGR2GRAY);
-        //     cv::cvtColor(rectRightC,  rectRightCGray,  cv::COLOR_BGR2GRAY);
-
-
-        //     // Compute disparity
-        //     cv::Mat dispC = computeDisparitySGBM(rectLeftCGray, rectRightCGray);
-
-        //     // Normalize for saving
-        //     // double minv, maxv;
-        //     cv::minMaxLoc(dispC, &minv, &maxv);
-        //     cv::Mat dispC8;
-        //     dispC.convertTo(dispC8, CV_8U, 255.0/(maxv - minv + 1e-6));
-
-        //     std::string dispCName = "calib_disparity_" + method.name + ".png";
-        //     cv::imwrite(dispCName, dispC8);
-
-
-        // std::cout << "\nDone. 6 images (3 methods x 2 rectification) saved.\n";
-
-
-
-        /********************************************************
-        * (3) Depth Map Calculation and 3D Mesh Generation
-        ********************************************************/
-        std::string disp_mode = "own";     // or "from own"
-
-
-        // load disparity map from ground truth pfm or from own computation
-        cv::Mat disparity_gt;
-        if (disp_mode == "pfm") {
-            std::string disparity_gt_path = "/workspace/Datasets/" + dataset + "/disp0.pfm";
-            disparity_gt = readPFM(disparity_gt_path);
-
-            // Print information about the disparity map
-            std::cout << "Disparity map info:" << std::endl;
-            std::cout << "Size: " << disparity_gt.size() << std::endl;
-            std::cout << "Type: " << disparity_gt.type() << std::endl;
-
-            // Check value range
+        // --- Step (1): Uncalibrated Rectification ---
+        cv::Mat dispU8; // Disparity map from uncalibrated method
+        {
+            cv::Mat H1, H2;
+            cv::stereoRectifyUncalibrated(ptsLeft, ptsRight, F, leftImage.size(), H1, H2);
+            cv::Mat rectLeftU, rectRightU;
+            cv::warpPerspective(leftImage, rectLeftU, H1, leftImage.size());
+            cv::warpPerspective(rightImage, rectRightU, H2, leftImage.size());
+            cv::Mat stereoUncalib;
+            cv::hconcat(rectLeftU, rectRightU, stereoUncalib);
+            // Draw horizontal lines on the uncalibrated rectified image for visualization
+            for (int y = 50; y < stereoUncalib.rows; y += 100) {
+                cv::line(stereoUncalib, cv::Point(0, y), cv::Point(stereoUncalib.cols-1, y),
+                         cv::Scalar(0, 255, 0), 1);
+            }
+            std::string uncalibName = "uncalib_rectify_opencv_" + method.name + ".png";
+            cv::imwrite(uncalibName, stereoUncalib);
+            cv::Mat rectLeftUGray, rectRightUGray;
+            cv::cvtColor(rectLeftU, rectLeftUGray, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(rectRightU, rectRightUGray, cv::COLOR_BGR2GRAY);
+            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
+            clahe->apply(rectLeftUGray, rectLeftUGray);
+            clahe->apply(rectRightUGray, rectRightUGray);
+            cv::Mat dispU = computeDisparitySGBM(rectLeftUGray, rectRightUGray);
             double minVal, maxVal;
-            cv::minMaxLoc(disparity_gt, &minVal, &maxVal);
-            std::cout << "[DISP] Min value: " << minVal << std::endl;
-            std::cout << "[DISP] Max value: " << maxVal << std::endl;
+            cv::minMaxLoc(dispU, &minVal, &maxVal);
+            dispU.convertTo(dispU8, CV_8U, 255.0/(maxVal - minVal + 1e-6));
+            std::string dispUName = "uncalib_disparity_opencv_" + method.name + ".png";
+            cv::imwrite(dispUName, dispU8);
 
-            // --- Create visualization with proper (gray) scaling
-            cv::Mat disparity_vis;
-            std::string disparity_out_path = "/workspace/results/" + dataset + "_disparity_from_pfm.png";
-            cv::minMaxLoc(disparity_gt, &minVal, &maxVal);
-            disparity_gt.convertTo(disparity_vis, CV_32F, 1.0/(maxVal - minVal), -minVal/(maxVal - minVal));
-            disparity_vis.convertTo(disparity_vis, CV_8UC1, 255.0);
-            // do not use "disparity_vis" for depth calculation because disp values are relative
-            cv::imwrite(disparity_out_path, disparity_vis);
-        } else {
-             disparity_gt = dispC8;
+            // For BRISK, generate the depth map and mesh from the computed disparity
+            if (method.name == "BRISK") {
+                std::string depth_map_nc = "/workspace/results/" + dataset + "_depth_map_uncalib_opencv_" + method.name + ".png";
+                cv::Mat depth_map = computeDepthMapAndVis(dispU8, focal_length, baseline, depth_map_nc,
+                                                           upperDistanceThreshold, lowerDistanceThreshold);
+                std::string mesh_output_nc = "/workspace/results/" + dataset + "_mesh_uncalib_opencv_" + method.name + ".off";
+                generateMeshFromDepth(depth_map, K0, dataset + "_uncalib_" + method.name,
+                                      upperDistanceThreshold, lowerDistanceThreshold);
+            }
         }
 
-        // --- convert to depth map
-        std::string depth_map_out_path = "/workspace/results/" + dataset + "_depth_map.png";
-        cv::Mat depth_map = computeDepthMapAndVis(disparity_gt, focal_length, baseline, depth_map_out_path,
-            upperDistanceThreshold, lowerDistanceThreshold);
+        // --- Step (2): Calibrated Rectification (Custom Implementation) ---
+        cv::Mat dispC8; // Disparity map from custom calibrated method
+        {
+            cv::Mat E = K1.t() * F * K0;
+            cv::Mat bestR, bestT;
+            decomposeEssentialMatrix(E, ptsLeft, ptsRight, K0, bestR, bestT);
+            cv::Mat P_left = cv::Mat::zeros(3,4,CV_64F);
+            K0.copyTo(P_left(cv::Rect(0,0,3,3)));
+            cv::Mat RT;
+            cv::hconcat(bestR, bestT, RT);
+            cv::Mat P_right = K1 * RT;
+            cv::Mat H_left = P_left(cv::Rect(0,0,3,3)) * K0.inv();
+            cv::Mat H_right = P_right(cv::Rect(0,0,3,3)) * K1.inv();
+            cv::Mat rectLeftC, rectRightC;
+            myWarpPerspective(leftImage, rectLeftC, H_left, leftImage.size());
+            myWarpPerspective(rightImage, rectRightC, H_right, leftImage.size());
+            cv::Mat stereoCalib;
+            cv::hconcat(rectLeftC, rectRightC, stereoCalib);
+            // Draw horizontal lines on the custom calibrated rectified image for visual inspection
+            for (int y = 50; y < stereoCalib.rows; y += 100) {
+                cv::line(stereoCalib, cv::Point(0, y), cv::Point(stereoCalib.cols-1, y),
+                         cv::Scalar(0, 255, 0), 1);
+            }
+            std::string calibName = "ours_calib_rectify_" + method.name + ".png";
+            cv::imwrite(calibName, stereoCalib);
+            cv::Mat rectLeftCGray, rectRightCGray;
+            cv::cvtColor(rectLeftC, rectLeftCGray, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(rectRightC, rectRightCGray, cv::COLOR_BGR2GRAY);
+            cv::Mat rectLeftCGraySmall, rectRightCGraySmall;
+            cv::resize(rectLeftCGray, rectLeftCGraySmall, cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
+            cv::resize(rectRightCGray, rectRightCGraySmall, cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
+            int dispRangeCalib = 256, p1Calib = 10, p2Calib = 5;
+            cv::Mat dispC = computeDisparityFastSGBM(rectLeftCGraySmall, rectRightCGraySmall, dispRangeCalib, p1Calib, p2Calib);
+            double minValC, maxValC;
+            cv::minMaxLoc(dispC, &minValC, &maxValC);
+            dispC.convertTo(dispC8, CV_8U, 255.0/(maxValC - minValC + 1e-6));
+            std::string dispCName = "ours_calib_disparity_" + method.name + ".png";
+            cv::imwrite(dispCName, dispC8);
 
-        // --- generate 3D mesh
-        std::string mesh_output_path = "/workspace/results/" + dataset + "_mesh.off";
-        generateMeshFromDepth(depth_map, K0, dataset, upperDistanceThreshold, lowerDistanceThreshold, edgeThreshold);
+            // For BRISK, generate the depth map and mesh from the custom calibrated disparity
+            if (method.name == "BRISK") {
+                std::string depth_map_custom = "/workspace/results/" + dataset + "_depth_map_calib_ours_" + method.name + ".png";
+                cv::Mat depth_map = computeDepthMapAndVis(dispC8, focal_length, baseline, depth_map_custom,
+                                                           upperDistanceThreshold, lowerDistanceThreshold);
+                std::string mesh_output_custom = "/workspace/results/" + dataset + "_mesh_calib_ours_" + method.name + ".off";
+                generateMeshFromDepth(depth_map, K0, dataset + "_calib_custom_" + method.name,
+                                      upperDistanceThreshold, lowerDistanceThreshold);
+            }
+        }
 
-        mesh_evaluation("/workspace/results/artroom1_mesh.off");
+        // --- Step (3): Calibrated Rectification using OpenCV's Built-in Functions ---
+        cv::Mat dispC8_op; // Disparity map from OpenCV's calibrated rectification
+        {
+            cv::Mat E = K1.t() * F * K0;
+            cv::Mat bestR_op, bestT_op;
+            decomposeEssentialMatrix(E, ptsLeft, ptsRight, K0, bestR_op, bestT_op);
+            cv::Size imageSize(leftImage.cols, leftImage.rows);
+            cv::Mat RR1, RR2, PP1, PP2, Q;
+            cv::stereoRectify(K0, D0, K1, D1, imageSize,
+                              bestR_op, bestT_op, RR1, RR2, PP1, PP2, Q,
+                              0, -1, imageSize);
+            cv::Mat mapxL, mapyL, mapxR, mapyR;
+            cv::initUndistortRectifyMap(K0, D0, RR1, PP1, imageSize, CV_32FC1, mapxL, mapyL);
+            cv::initUndistortRectifyMap(K1, D1, RR2, PP2, imageSize, CV_32FC1, mapxR, mapyR);
+            cv::Mat rectLeftC_op, rectRightC_op;
+            cv::remap(leftImage, rectLeftC_op, mapxL, mapyL, cv::INTER_LINEAR);
+            cv::remap(rightImage, rectRightC_op, mapxR, mapyR, cv::INTER_LINEAR);
+            cv::Mat stereoCalib_op;
+            cv::hconcat(rectLeftC_op, rectRightC_op, stereoCalib_op);
+            // Draw horizontal lines on the OpenCV calibrated rectified image for inspection
+            for (int y = 50; y < stereoCalib_op.rows; y += 100) {
+                cv::line(stereoCalib_op, cv::Point(0, y), cv::Point(stereoCalib_op.cols-1, y),
+                         cv::Scalar(0, 255, 0), 1);
+            }
+            std::string calibName_op = "calib_opencv_" + method.name + ".png";
+            cv::imwrite(calibName_op, stereoCalib_op);
+            cv::Mat rectLeftCGray_op, rectRightCGray_op;
+            cv::cvtColor(rectLeftC_op, rectLeftCGray_op, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(rectRightC_op, rectRightCGray_op, cv::COLOR_BGR2GRAY);
+            cv::Mat dispC_op = computeDisparitySGBM(rectLeftCGray_op, rectRightCGray_op);
+            double minv_op, maxv_op;
+            cv::minMaxLoc(dispC_op, &minv_op, &maxv_op);
+            dispC_op.convertTo(dispC8_op, CV_8U, 255.0/(maxv_op - minv_op + 1e-6));
+            std::string dispCName_op = "calib_disparity_opencv_" + method.name + ".png";
+            cv::imwrite(dispCName_op, dispC8_op);
+
+            // For BRISK, generate the depth map and mesh from the OpenCV calibrated disparity
+            if (method.name == "BRISK") {
+                std::string depth_map_op = "/workspace/results/" + dataset + "_depth_map_calib_opencv_" + method.name + ".png";
+                cv::Mat depth_map = computeDepthMapAndVis(dispC8_op, focal_length, baseline, depth_map_op,
+                                                           upperDistanceThreshold, lowerDistanceThreshold);
+                std::string mesh_output_op = "/workspace/results/" + dataset + "_mesh_calib_opencv_" + method.name + ".off";
+                generateMeshFromDepth(depth_map, K0, dataset + "_calib_opencv_" + method.name,
+                                      upperDistanceThreshold, lowerDistanceThreshold);
+            }
+        }
     }
 
     return 0;

@@ -11,6 +11,54 @@
 #include "includes/common.hpp"
 #include "includes/depth_map_generation.h"
 #include "includes/mesh_generation.h"
+//Based on the Ransac to compute the F->the threshold for Shopvac dataset 
+cv::Mat processFeatureMethod(const std::string &method,
+                             std::vector<cv::Point2f> &pointsLeft,
+                             std::vector<cv::Point2f> &pointsRight,
+                             const std::vector<cv::DMatch> &good_matches)
+{
+
+    if (good_matches.empty())
+    {
+        std::cerr << "[ERROR] good_matches is empty." << std::endl;
+        return cv::Mat();
+    }
+
+   
+    static const std::unordered_map<std::string, double> thresholdMap = {
+        {"ORB", 0.03},
+        {"SIFT", 0.018},
+        {"BRISK", 0.002}};
+
+    auto it = thresholdMap.find(method);
+    if (it == thresholdMap.end())
+    {
+        std::cerr << "[WARN] unsupported detective method: " << method << std::endl;
+        return cv::Mat();
+    }
+    double threshold = it->second;
+
+    // compute the fundamental matrix
+    int inlierCount = 0;
+    std::vector<cv::Point2f> ptsLeftCopy = pointsLeft;
+    std::vector<cv::Point2f> ptsRightCopy = pointsRight;
+    cv::Mat F = ransacFundamentalMatrix(ptsLeftCopy, ptsRightCopy, 3000, threshold, inlierCount);
+    if (F.empty())
+    {
+        std::cerr << "[WARN] " << method << ": F is empty." << std::endl;
+        return cv::Mat();
+    }
+
+    std::cout << "[INFO] " << method << " => #inliers = " << inlierCount << std::endl;
+
+    // calculate the reprojection error
+    double error_all = computeReprojectionError(pointsLeft, pointsRight, F);
+    std::cout << "[INFO] the error for ransac: " << error_all << std::endl;
+    double average_error = error_all / static_cast<double>(good_matches.size());
+    std::cout << "[INFO] the average error of each match: " << average_error << std::endl;
+
+    return F;
+}
 
 // Compute disparity map using OpenCV's built-in StereoSGBM algorithm
 cv::Mat computeDisparitySGBM(const cv::Mat &leftGray, const cv::Mat &rightGray)
@@ -183,7 +231,7 @@ int main()
             continue;
         }
 
-        // Step (b): KNN matching followed by a ratio test
+        // Step (b1): KNN matching followed by a ratio test
         cv::Ptr<cv::DescriptorMatcher> matcher = cv::BFMatcher::create(method.normType, false);
         std::vector<std::vector<cv::DMatch>> knn;
         matcher->knnMatch(descLeft, descRight, knn, 2);
@@ -193,6 +241,14 @@ int main()
             if (m.size() == 2 && m[0].distance < ratioThresh * m[1].distance)
                 goodMatches.push_back(m[0]);
         }
+        // Step (b2): dist threshold
+        // for (int i = 0; i < descLeft.rows; i++)
+        // {
+        //     if (matches[i].distance <= std::max(3.5 * min_dist, 30.0))
+        //     {
+        //         goodMatches.push_back(matches[i]);
+        //     }
+        // }
         if (goodMatches.size() < 8) {
             std::cerr << "[WARN] " << method.name << ": Not enough good matches.\n";
             continue;
@@ -205,7 +261,7 @@ int main()
             ptsRight.push_back(kpRight[gm.trainIdx].pt);
         }
 
-        // Step (d): Estimate the fundamental matrix F using RANSAC
+        // Step (d1): Estimate the fundamental matrix F using RANSAC
         int inlierCount = 0;
         cv::Mat F = ransacFundamentalMatrix(ptsLeft, ptsRight, 5000, 1.5f, inlierCount);
         if (F.empty()) {
@@ -213,6 +269,8 @@ int main()
             continue;
         }
         std::cout << "[INFO] " << method.name << " => #inliers=" << inlierCount << "\n";
+        // Step (d2): specific threshold for the Shopvac dataset
+        // cv::Mat F = ransacFundamentalMatrix(method.name,ptsLeft, ptsRight,goodMatches );
 
         // --- Step (1): Uncalibrated Rectification ---
         cv::Mat dispU8; // Disparity map from uncalibrated method

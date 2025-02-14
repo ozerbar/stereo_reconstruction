@@ -7,6 +7,10 @@ RUN apt-get -y update && apt-get install -y
 RUN apt-get -y install cmake libgflags-dev libatlas-base-dev libeigen3-dev libsuitesparse-dev build-essential g++ gdb python3-dev autotools-dev libicu-dev libbz2-dev libboost-all-dev libflann-dev libfreeimage3 libfreeimage-dev lz4 libopencv-dev python3-opencv
 # ->
 
+# Clone libigl
+RUN git clone --recursive https://github.com/libigl/libigl.git
+
+
 # Configure GCC 9
 # <-
 RUN apt-get -y install gcc-9 g++-9

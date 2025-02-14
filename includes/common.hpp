@@ -20,5 +20,7 @@
 #include "warp_perspective.h"
 
 #include "fast_sgbm/fast_sgbm.h"
+#include "mesh_generation.h"
+#include "depth_map_generation.h"
 
 #endif // COMMON_HPP

@@ -12,6 +12,8 @@
 #include <ctime>
 
 #include "includes/common.hpp"
+#include "includes/mesh_eval.h"
+
 
 
 
@@ -47,9 +49,11 @@ cv::Mat computeDisparityFastSGBM(cv::Mat &leftGray, cv::Mat &rightGray, int disp
 
 int main()
 {
+
     // 1) Load images
-    std::string leftImagePath  = "../Datasets/Shopvac-imperfect/im0.png";
-    std::string rightImagePath = "../Datasets/Shopvac-imperfect/im1.png";
+    std::string dataset = "shopvac_imperfect";
+    std::string leftImagePath  = "../Datasets/" + dataset + "/im0.png";
+    std::string rightImagePath = "../Datasets/" + dataset + "/im1.png";
 
     cv::Mat leftImage  = cv::imread(leftImagePath,  cv::IMREAD_COLOR);
     cv::Mat rightImage = cv::imread(rightImagePath, cv::IMREAD_COLOR);
@@ -65,6 +69,7 @@ int main()
         int normType;
     };
     std::vector<FeatureMethod> methods = {
+        // TODO: set the feature method you would like to use
         // { "ORB",   cv::ORB::create(),   cv::NORM_HAMMING },
         // { "SIFT",  cv::SIFT::create(),  cv::NORM_L2      },
         { "BRISK", cv::BRISK::create(), cv::NORM_HAMMING }
@@ -72,20 +77,34 @@ int main()
 
     // 3) Suppose we have camera intrinsics for "calibrated" approach
     //    (Replace these with your actual intrinsics)
+
+
+    // shopvac
     cv::Mat K0 = (cv::Mat_<double>(3,3) << 7228.4,  0,      1112.085,
                                            0,       7228.4, 1010.431,
                                            0,       0,      1.0);
     cv::Mat K1 = (cv::Mat_<double>(3,3) << 7228.4,  0,      1628.613,
                                            0,       7228.4, 1010.431,
                                            0,       0,      1.0);
+
+    // artroom
+    /*cv::Mat K0 = (cv::Mat_<double>(3,3) << 1733.74, 0, 792.27,
+                                                        0, 1733.74, 541.89,
+                                                        0, 0, 1);
+    cv::Mat K1 = (cv::Mat_<double>(3,3) << 1733.74, 0, 792.27,
+                                                        0, 1733.74, 541.89,
+                                                        0, 0, 1);
+    */
+
     cv::Mat D0 = cv::Mat::zeros(1,5, CV_64F);
     cv::Mat D1 = cv::Mat::zeros(1,5, CV_64F);
 
-    // 3.5) Define parameters for depth map and mesh generation
-    float focal_length = 7228.4;
-    float baseline = 379.965;
-    float upperDistanceThreshold = 50.0;
-    float lowerDistanceThreshold = 0.1;
+    // 3.5) TODO: Define parameters for depth map and mesh generation
+    float focal_length = 7228.4;    // focal length of the camera
+    float baseline = 379.965;   // baseline of the scene
+    float upperDistanceThreshold = 50.0;    // upper distance threshold for depth map generation
+    float lowerDistanceThreshold = 0.1;     // lower distance threshold for depth map computation
+    float edgeThreshold = 0.02;     // max distance between two points so that they form an edge
 
 
     // 4) Loop over each feature method
@@ -312,7 +331,7 @@ int main()
         * (3) Depth Map Calculation and 3D Mesh Generation
         ********************************************************/
         std::string disp_mode = "own";     // or "from own"
-        std::string dataset = "shopvac_imperfect";
+
 
         // load disparity map from ground truth pfm or from own computation
         cv::Mat disparity_gt;
@@ -350,7 +369,9 @@ int main()
 
         // --- generate 3D mesh
         std::string mesh_output_path = "/workspace/results/" + dataset + "_mesh.off";
-        generateMeshFromDepth(depth_map, K0, dataset, upperDistanceThreshold, lowerDistanceThreshold);
+        generateMeshFromDepth(depth_map, K0, dataset, upperDistanceThreshold, lowerDistanceThreshold, edgeThreshold);
+
+        mesh_evaluation("/workspace/results/artroom1_mesh.off");
     }
 
     return 0;
